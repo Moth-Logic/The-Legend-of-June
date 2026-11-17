@@ -1,4 +1,4 @@
-# 🏹 The Legend of June
+# The Legend of June
 
 Juego ASCII de supervivencia para la terminal, inspirado en The Legend of Zelda.
 Esquivá proyectiles, atacá con la espada y sobreviví oleadas de enemigos cada vez más difíciles.

@@ -400,3 +400,210 @@ public:
 private:
     EstadoPartida estado = E_MENU;
 };
+
+// GameEngine: director del juego. Es el unico que conecta los modulos entre si:
+// en cada cuadro lee comandos, actualiza entidades, revisa colisiones, pide la
+// siguiente oleada y dibuja (ver cuadro() y logica()).
+class GameEngine {
+public:
+    GameEngine() {}
+    int ejecutar();
+
+    BenchCuadro benchmark(int n, bool conPantalla);
+private:
+    int mapa = 0;
+    Arena arena;
+    InputHandler input;
+    StateManager estados;
+    Renderer render;
+    WaveManager oleadas;
+    CollisionDetector colisionador;
+    Jugador jugador;
+    Entidades enemigos;
+    Entidades proyectiles;
+    Entidades corazones;
+    int puntaje = 0;
+    bool esperando = true;
+    int pausaOleada = 0;
+    bool salir = false;
+
+    void cargarMapa(int i);
+    void siguienteMapa();
+    void empujarEnemigo(uint32_t j);
+    void inicializar();
+    void nuevaPartida(int mapaFijo = -1);
+    void cuadro();
+    void logica(const std::vector<Comando>& cmds);
+    void actualizarEntidades();
+    bool revisarColisiones();
+    void limpiarMuertos();
+    void soltarCorazon(int32_t x, int32_t y);
+    void recogerCorazones();
+    void pedirOleada();
+    void pintar();
+    void dibujar();
+    void controlarTiempo(const timespec& inicio);
+    void celdaLibreAleatoria(int& cx, int& cy) const;
+};
+
+// RUTINAS CRITICAS - version en C++ (referencia)
+// Con -DUSAR_ASM estas funciones no se compilan y se usan las de ensamblador
+// (Etapa 3). Sirven para verificar que el ensamblador da los mismos resultados.
+#ifndef USAR_ASM
+
+extern "C" {
+
+// Suma la velocidad a la posicion: n es la cantidad de enteros (2 por entidad: x, y).
+void mover_entidades(int32_t* pos, const int32_t* vel, uint32_t n) {
+    for (uint32_t i = 0; i < n; i++)
+        pos[i] += vel[i];
+}
+
+// Para cada pareja (i, j) escribe en res[i*nb + j] un 1 si los rectangulos a[i] y
+// b[j] se traslapan (prueba de ejes alineados) y un 0 si no.
+void colisiones(const Rect* a, uint32_t na, const Rect* b, uint32_t nb, uint8_t* res) {
+    for (uint32_t i = 0; i < na; i++) {
+        for (uint32_t j = 0; j < nb; j++) {
+            bool toca = a[i].x < b[j].x + b[j].ancho && a[i].x + a[i].ancho > b[j].x &&
+                        a[i].y < b[j].y + b[j].alto && a[i].y + a[i].alto > b[j].y;
+            res[i * nb + j] = toca ? 1 : 0;
+        }
+    }
+}
+
+// Copia el sprite al buffer en (d->x, d->y): salta los espacios (para no borrar lo
+// que esta debajo) y recorta lo que se salga de los bordes del buffer.
+void copiar_sprite(DatosSprite* d) {
+    for (int32_t f = 0; f < d->spAlto; f++) {
+        int32_t by = d->y + f;
+        if (by < 0 || by >= d->bufAlto) continue;
+        for (int32_t c = 0; c < d->spAncho; c++) {
+            int32_t bx = d->x + c;
+            if (bx < 0 || bx >= d->bufAncho) continue;
+            char ch = d->sprite[f * d->spAncho + c];
+            if (ch == ' ') continue;
+            d->buffer[by * d->bufAncho + bx] = ch;
+        }
+    }
+}
+
+}
+
+#endif
+
+// IMPLEMENTACION
+
+// Arena 
+Arena::Arena() { generarPorDefecto(); }
+
+// Rellena de paredes el rectangulo de celdas (x0,y0)-(x1,y1) (ambos inclusive).
+void Arena::bloque(int x0, int y0, int x1, int y1) {
+    for (int y = y0; y <= y1; y++)
+        for (int x = x0; x <= x1; x++)
+            celdas[y][x] = '#';
+}
+
+// Arena de respaldo: borde de paredes mas 8 obstaculos, equivalente a mapa1.txt.
+void Arena::generarPorDefecto() {
+    memset(celdas, ' ', sizeof(celdas));
+    bloque(0, 0, ARENA_W - 1, 0);
+    bloque(0, ARENA_H - 1, ARENA_W - 1, ARENA_H - 1);
+    bloque(0, 0, 0, ARENA_H - 1);
+    bloque(ARENA_W - 1, 0, ARENA_W - 1, ARENA_H - 1);
+    bloque(10, 4, 13, 5);
+    bloque(46, 4, 49, 5);
+    bloque(10, 14, 13, 15);
+    bloque(46, 14, 49, 15);
+    bloque(26, 6, 33, 6);
+    bloque(26, 13, 33, 13);
+    bloque(20, 8, 20, 11);
+    bloque(39, 8, 39, 11);
+}
+
+// Carga una arena desde un archivo de texto de 20 filas: '#' es pared y cualquier
+// otro caracter es piso. Devuelve false (sin modificar la arena) si faltan filas.
+bool Arena::cargar(const char* ruta) {
+    std::ifstream f(ruta);
+    if (!f) return false;
+    char tmp[ARENA_H][ARENA_W];
+    std::string linea;
+    int fila = 0;
+    while (fila < ARENA_H && std::getline(f, linea)) {
+        for (int c = 0; c < ARENA_W; c++)
+            tmp[fila][c] = (c < (int)linea.size() && linea[c] == '#') ? '#' : ' ';
+        fila++;
+    }
+    if (fila < ARENA_H) return false;
+    memcpy(celdas, tmp, sizeof(celdas));
+    return true;
+}
+
+// true si la celda es pared; todo lo que queda fuera de la arena tambien cuenta como pared.
+bool Arena::esPared(int cx, int cy) const {
+    if (cx < 0 || cy < 0 || cx >= ARENA_W || cy >= ARENA_H) return true;
+    return celdas[cy][cx] == '#';
+}
+
+// Linea de Bresenham entre dos celdas: true si no hay paredes en el camino (tampoco
+// se puede pasar por una esquina diagonal cerrada). Se usa para que el golpe no atraviese paredes.
+bool Arena::lineaLibre(int x0, int y0, int x1, int y1) const {
+    int dx = std::abs(x1 - x0), dy = std::abs(y1 - y0);
+    int sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1;
+    int err = dx - dy;
+    int x = x0, y = y0;
+    while (x != x1 || y != y1) {
+        int e2 = 2 * err;
+        int ox = x, oy = y;
+        if (e2 > -dy) { err -= dy; x += sx; }
+        if (e2 < dx) { err += dx; y += sy; }
+        if (x != ox && y != oy && esPared(ox + sx, oy) && esPared(ox, oy + sy)) return false;
+        if (esPared(x, y)) return false;
+    }
+    return true;
+}
+
+// Mueve (cx, cy) a la celda libre mas cercana (busqueda en anillos crecientes).
+void Arena::libreCerca(int& cx, int& cy) const {
+    for (int r = 0; r < ARENA_W; r++) {
+        for (int dy = -r; dy <= r; dy++) {
+            for (int dx = -r; dx <= r; dx++) {
+                if (!esPared(cx + dx, cy + dy)) {
+                    cx += dx;
+                    cy += dy;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+// Input Handler 
+// Configura la consola una sola vez: sin esperar Enter, sin eco, teclas especiales,
+// lectura que no bloquea y cursor oculto.
+void KeyboardReader::iniciarNcurses() {
+    initscr();
+    cbreak();
+    noecho();
+    keypad(stdscr, TRUE);
+    nodelay(stdscr, TRUE);
+    curs_set(0);
+    set_escdelay(25);
+}
+
+// Lee una tecla con getch(); si no se apreto nada devuelve NINGUNA.
+int KeyboardReader::leerTecla() {
+    int t = getch();
+    return t == ERR ? NINGUNA : t;
+}
+
+void KeyboardReader::cerrarNcurses() { endwin(); }
+
+// Agrega la tecla al final de la cola circular; si esta llena descarta la mas vieja.
+void InputBuffer::guardar(int tecla) {
+    if (cantidad == 8) {
+        inicio = (inicio + 1) % 8;
+        cantidad--;
+    }
+    datos[(inicio + cantidad) % 8] = tecla;
+    cantidad++;
+}

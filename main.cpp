@@ -819,3 +819,199 @@ void Enemigos::actualizar(Entidades& e, const int32_t* jug, const FnDisparo& dis
             v[0] = v[1] = 0;
             continue;
         }
+        
+        int32_t ovx = v[0], ovy = v[1];
+        bool trabado = (ovx != 0 || ovy != 0) && p[0] == e.prev[2 * i] && p[1] == e.prev[2 * i + 1];
+
+        int32_t dx = jug[0] - p[0], dy = jug[1] - p[1];
+        int adx = std::abs(dx) >> FP_BITS, ady = std::abs(dy) >> FP_BITS;
+        int dist = std::max(adx, 2 * ady);
+
+        if (e.tipo[i] == SOLDADO) {
+            e.estado[i] = PERSEGUIR;
+            v[0] = limitar(dx, VEL_SOL_X);
+            v[1] = limitar(dy, VEL_SOL_Y);
+        }
+        else if (e.tipo[i] == ARQUERO) {
+            bool horiz = std::abs(dx) >= std::abs(dy);
+            if (horiz) {
+                v[1] = limitar(dy, VEL_ARQ_Y);
+                if (adx > 14) v[0] = signo(dx) * VEL_ARQ_X;
+                else if (adx < 8) v[0] = -signo(dx) * VEL_ARQ_X;
+                else v[0] = 0;
+            }
+            else {
+                v[0] = limitar(dx, VEL_ARQ_X);
+                if (ady > 7) v[1] = signo(dy) * VEL_ARQ_Y;
+                else if (ady < 3) v[1] = -signo(dy) * VEL_ARQ_Y;
+                else v[1] = 0;
+            }
+            e.estado[i] = (v[0] == 0 && v[1] == 0) ? DISPARAR : PERSEGUIR;
+
+            bool alineado = horiz ? aCelda(p[1]) == aCelda(jug[1]) : aCelda(p[0]) == aCelda(jug[0]);
+            bool enRango = horiz ? adx <= 28 : ady <= 14;
+            if (e.espera[i] == 0 && alineado && enRango) {
+                int32_t vx = 0, vy = 0;
+                if (horiz) vx = signo(dx) * VEL_PROY_X;
+                else vy = signo(dy) * VEL_PROY_Y;
+                disparar(p[0], p[1], vx, vy);
+                e.espera[i] = 60;
+                e.estado[i] = DISPARAR;
+            }
+        }
+        else {
+            if (dist > 18) {
+                v[0] = signo(dx) * VEL_MAG_X;
+                v[1] = signo(dy) * VEL_MAG_Y;
+            }
+            else if (dist < 10) {
+                v[0] = -signo(dx) * VEL_MAG_X;
+                v[1] = -signo(dy) * VEL_MAG_Y;
+            }
+            else {
+                v[0] = v[1] = 0;
+            }
+            e.estado[i] = (v[0] == 0 && v[1] == 0) ? DISPARAR : PERSEGUIR;
+
+            if (e.espera[i] == 0 && dist <= 30) {
+                int64_t m = std::max<int64_t>(std::abs(dx), 2 * (int64_t)std::abs(dy));
+                if (m == 0) m = 1;
+                int32_t vx = (int32_t)((int64_t)dx * VEL_PROY_X / m);
+                int32_t vy = (int32_t)((int64_t)dy * VEL_PROY_X / m);
+                disparar(p[0], p[1], vx, vy);
+                e.espera[i] = 80;
+                e.estado[i] = DISPARAR;
+            }
+        }
+
+        if (e.desvio[i] > 0) {
+            e.desvio[i]--;
+            v[0] = e.desvioVel[2 * i];
+            v[1] = e.desvioVel[2 * i + 1];
+        }
+        else if (trabado) {
+            int s = (std::rand() & 1) ? 1 : -1;
+            e.desvio[i] = DESVIO_CUADROS;
+            if (std::abs(ovx) >= 2 * std::abs(ovy)) {
+                e.desvioVel[2 * i] = 0;
+                e.desvioVel[2 * i + 1] = s * std::max(std::abs(ovx) / 2, 1);
+            }
+            else {
+                e.desvioVel[2 * i] = s * std::max(std::abs(ovy) * 2, 1);
+                e.desvioVel[2 * i + 1] = 0;
+            }
+            v[0] = e.desvioVel[2 * i];
+            v[1] = e.desvioVel[2 * i + 1];
+        }
+    }
+}
+
+// Guarda las posiciones actuales como anteriores y mueve TODOS los enemigos con una sola llamada a mover_entidades().
+void Enemigos::mover(Entidades& e) {
+    memcpy(e.prev, e.pos, sizeof(int32_t) * 2 * e.n);
+    mover_entidades(e.pos, e.vel, 2 * e.n);
+}
+
+// Resta vida, activa parpadeo e inmunidad corta. Devuelve true si la vida llego a 0 (se elimina al final del cuadro).
+bool Enemigos::recibirDano(Entidades& e, uint32_t i) {
+    if (e.inmune[i] > 0 || e.vida[i] <= 0) return false;
+    e.vida[i]--;
+    e.parpadeo[i] = PARPADEO_CUADROS;
+    e.inmune[i] = INMUNE_ENEMIGO;
+    e.estado[i] = HERIDO;
+    return e.vida[i] <= 0;
+}
+
+// Detiene al enemigo durante 'cuadros' cuadros (despues de tocar al jugador).
+void Enemigos::aturdir(Entidades& e, uint32_t i, int cuadros) {
+    e.aturdido[i] = cuadros;
+    e.vel[2 * i] = e.vel[2 * i + 1] = 0;
+}
+
+// Crea un proyectil en la posicion del enemigo que disparo, con la velocidad dada.
+void Proyectiles::crear(Entidades& p, int32_t x, int32_t y, int32_t vx, int32_t vy) {
+    p.agregar(0, 1, x, y, vx, vy);
+}
+
+// Avanza todos los proyectiles en linea recta con una sola llamada a mover_entidades().
+void Proyectiles::mover(Entidades& p) {
+    memcpy(p.prev, p.pos, sizeof(int32_t) * 2 * p.n);
+    mover_entidades(p.pos, p.vel, 2 * p.n);
+}
+
+// Wave Manager 
+// En la oleada n salen 2n-1 enemigos (1, 3, 5, 7...), con tope de 60.
+int DifficultyScaler::cantidad(int oleada) const {
+    return std::min(2 * oleada - 1, 60);
+}
+
+// Tipo del enemigo numero i de la oleada. Oleada 1: solo Soldado. Oleada 2: Soldado,
+// Arquero y Mago. Desde la 3: uno de cada tres es de distancia (Arqueros; desde la 5
+// alternan con Magos).
+int DifficultyScaler::tipo(int oleada, int i) const {
+    if (oleada == 2) return i == 1 ? ARQUERO : (i == 2 ? MAGO : SOLDADO);   // 2da oleada: Soldado + Arquero + Mago
+    if (oleada < 3 || i % 3 != 2) return SOLDADO;
+    if (oleada < 5) return ARQUERO;
+    return ((i / 3) % 2 == 0) ? ARQUERO : MAGO;
+}
+
+// Vida base 2 (Mago 3), mas 1 cada 5 oleadas.
+int DifficultyScaler::vida(int oleada, int tipo) const {
+    int base = (tipo == MAGO) ? 3 : 2;
+    return base + (oleada - 1) / 5;
+}
+
+// Elige una celda libre al azar y lejos del jugador (si no encuentra, usa la primera libre).
+void EnemySpawner::elegirPunto(const Arena& arena, int jx, int jy, int& cx, int& cy) const {
+    for (int intento = 0; intento < 300; intento++) {
+        int x = 1 + std::rand() % (ARENA_W - 2);
+        int y = 1 + std::rand() % (ARENA_H - 2);
+        if (arena.esPared(x, y)) continue;
+        if (std::max(std::abs(x - jx), 2 * std::abs(y - jy)) < 16) continue;
+        cx = x;
+        cy = y;
+        return;
+    }
+    for (int y = 1; y < ARENA_H - 1; y++) {
+        for (int x = 1; x < ARENA_W - 1; x++) {
+            if (!arena.esPared(x, y)) {
+                cx = x;
+                cy = y;
+                return;
+            }
+        }
+    }
+}
+
+// Crea el enemigo en la celda indicada usando la funcion de agregar que dio el Game Engine.
+bool EnemySpawner::crear(int tipo, int vida, int cx, int cy, const FnAgregar& agregar) const {
+    return agregar(tipo, vida, aFijo(cx), aFijo(cy));
+}
+
+// Sube el numero de oleada y crea todos sus enemigos.
+void WaveManager::lanzar(const Arena& arena, int jx, int jy, const FnAgregar& agregar) {
+    contador.subir();
+    int o = contador.actual();
+    int n = dificultad.cantidad(o);
+    for (int i = 0; i < n; i++) {
+        int t = dificultad.tipo(o, i);
+        int cx = 1, cy = 1;
+        spawner.elegirPunto(arena, jx, jy, cx, cy);
+        spawner.crear(t, dificultad.vida(o, t), cx, cy, agregar);
+    }
+}
+
+// Render System 
+// Define los dibujos: @ jugador, S soldado, A arquero, M mago, - | * proyectiles, + golpe, <3 corazon.
+void ASCIISpriteMgr::cargar() {
+    jugador = Sprite{ "@", 1, 1 };
+    soldado = Sprite{ "S", 1, 1 };
+    arquero = Sprite{ "A", 1, 1 };
+    mago = Sprite{ "M", 1, 1 };
+    protH = Sprite{ "-", 1, 1 };
+    protV = Sprite{ "|", 1, 1 };
+    protM = Sprite{ "*", 1, 1 };
+    golpe = Sprite{ "+", 1, 1 };
+    marca = Sprite{ ".", 1, 1 };
+    corazon = Sprite{ "<3", 2, 1 };
+}

@@ -205,3 +205,198 @@ struct Entidades {
     void eliminar(uint32_t i);
     Rect rect(uint32_t i) const { return Rect{ aCelda(pos[2 * i]), aCelda(pos[2 * i + 1]), 1, 1 }; }
 };
+
+// Jugador: posicion, vida, invulnerabilidad, y la zona de golpe de su ataque.
+class Jugador {
+public:
+    int32_t pos[2], vel[2], prev[2];
+    int vida;
+    int inmune;
+    int espera;
+    int golpe;
+    Dir mira;
+    Dir dirGolpe;
+
+    void reiniciar(int cx, int cy);
+    void leerComandos(const std::vector<Comando>& cmds);
+    void actualizar();
+    bool recibirDano();
+    Rect rect() const;
+    Rect zonaGolpe() const;
+    bool golpeActivo() const { return golpe > 0; }
+private:
+    int quiereX, quiereY, mantenerX, mantenerY;
+    bool quiereAtacar;
+};
+
+// FnDisparo: funcion que el Game Engine le entrega a los enemigos para crear
+// proyectiles (los modulos no se conocen entre si, todo pasa por el motor).
+typedef std::function<void(int32_t x, int32_t y, int32_t vx, int32_t vy)> FnDisparo;
+
+// Enemigos: IA por estados (perseguir, disparar, herido), movimiento y dano.
+namespace Enemigos {
+    bool agregar(Entidades& e, int tipo, int vida, int32_t x, int32_t y);
+    void actualizar(Entidades& e, const int32_t* posJugador, const FnDisparo& disparar);
+    void mover(Entidades& e);
+    bool recibirDano(Entidades& e, uint32_t i);
+    void aturdir(Entidades& e, uint32_t i, int cuadros);
+}
+
+// Proyectiles: crean y mueven en linea recta los disparos de Arqueros y Magos.
+namespace Proyectiles {
+    void crear(Entidades& p, int32_t x, int32_t y, int32_t vx, int32_t vy);
+    void mover(Entidades& p);
+}
+
+// WAVE MANAGER 
+// FnAgregar: funcion que el Game Engine le entrega al Enemy Spawner para agregar
+// un enemigo al Entity System.
+typedef std::function<bool(int tipo, int vida, int32_t x, int32_t y)> FnAgregar;
+
+// WaveCounter: cuenta las oleadas y detecta cuando termina una (ya no quedan enemigos).
+class WaveCounter {
+public:
+    void reiniciar() { oleada = 0; }
+    void subir() { oleada++; }
+    int actual() const { return oleada; }
+    bool terminada(uint32_t vivos) const { return vivos == 0; }
+private:
+    int oleada = 0;
+};
+
+// DifficultyScaler: cuantos enemigos salen (2n-1), de que tipo y con cuanta vida.
+class DifficultyScaler {
+public:
+    int cantidad(int oleada) const;
+    int tipo(int oleada, int i) const;
+    int vida(int oleada, int tipo) const;
+};
+
+// EnemySpawner: elige un punto libre y lejos del jugador y crea el enemigo.
+class EnemySpawner {
+public:
+    void elegirPunto(const Arena& arena, int jx, int jy, int& cx, int& cy) const;
+    bool crear(int tipo, int vida, int cx, int cy, const FnAgregar& agregar) const;
+};
+
+// WaveManager: coordina los tres anteriores para lanzar una oleada.
+class WaveManager {
+public:
+    void reiniciar() { contador.reiniciar(); }
+    int oleadaActual() const { return contador.actual(); }
+    bool terminada(uint32_t vivos) const { return contador.terminada(vivos); }
+    void lanzar(const Arena& arena, int jx, int jy, const FnAgregar& agregar);
+private:
+    WaveCounter contador;
+    DifficultyScaler dificultad;
+    EnemySpawner spawner;
+};
+
+// RENDER SYSTEM 
+// Colores (pares de ncurses).
+enum Color { C_ROJO = 1, C_VERDE, C_AMARILLO, C_MAGENTA, C_CIAN, C_BLANCO, C_AZUL };
+
+// Sprite: dibujo de caracteres (ancho x alto) guardado fila por fila.
+struct Sprite {
+    const char* datos;
+    int ancho;
+    int alto;
+};
+
+// ASCIISpriteMgr: guarda los sprites del jugador, enemigos, proyectiles, golpe y corazon.
+class ASCIISpriteMgr {
+public:
+    void cargar();
+    Sprite jugador, soldado, arquero, mago;
+    Sprite protH, protV, protM;
+    Sprite golpe, marca, corazon;
+    static bool visible(int parpadeo) { return parpadeo % 2 == 0; }
+};
+
+// DatosHUD: datos que el HUD solo LEE para mostrar (vida, oleada, enemigos, puntos, mapa).
+struct DatosHUD {
+    int vida;
+    int oleada;
+    int enemigos;
+    int puntaje;
+    const char* mapa;
+    bool esperando;
+};
+
+// Renderer: dibuja todo primero en un buffer de caracteres (no en la pantalla) por
+// capas: arena, entidades y al final el HUD; luego lo copia a ncurses y llama a
+// refresh() una sola vez por cuadro para evitar parpadeos.
+class Renderer {
+public:
+    void iniciar(bool conPantalla = true);
+    void limpiar();
+    void pintarArena(const Arena& arena);
+    void pintarEntidades(const Arena& arena, const Jugador& j, const Entidades& enemigos, const Entidades& proy, const Entidades& corazones);
+    void pintarSprite(const Sprite& s, int cx, int cy, int color);
+    void texto(int x, int y, const std::string& s, int color);
+    void textoCentrado(int y, const std::string& s, int color);
+    void refrescar();
+    bool terminalSuficiente() const;
+private:
+    ASCIISpriteMgr sprites;
+    char buf[PANT_H][PANT_W];
+    unsigned char col[PANT_H][PANT_W];
+    bool hayColor = false;
+    bool pantalla = true;
+};
+
+// HUDManager: vida, oleada, puntos, menu, pausa y pantalla de derrota. Nunca cambia datos del juego.
+class HUDManager {
+public:
+    static void dibujar(Renderer& r, const DatosHUD& d);
+    static void menu(Renderer& r);
+    static void pausa(Renderer& r);
+    static void derrota(Renderer& r, const DatosHUD& d);
+};
+
+// GAME ENGINE
+// CollisionDetector: usa la rutina colisiones() (parte critica) y ademas frena el
+// movimiento contra las paredes devolviendo la entidad a su posicion anterior.
+class CollisionDetector {
+public:
+
+    const uint8_t* comparar(const Rect* a, uint32_t na, const Rect* b, uint32_t nb);
+
+    static void frenarContraPared(const Arena& arena, int32_t* pos, const int32_t* prev);
+
+    static void desplazarSinPared(const Arena& arena, int32_t* pos, int32_t* prev, int32_t dx, int32_t dy);
+
+private:
+    uint8_t res[MAX_ENT * MAX_ENT];
+};
+
+// BenchCuadro: resultados del modo de rendimiento (--bench N), en microsegundos por cuadro.
+struct BenchCuadro {
+    int n = 0;
+    int cuadros = 0;
+    bool conPantalla = false;
+    double total_us = 0;
+    double logica_us = 0;
+    double pintar_us = 0;
+    double refresco_us = 0;
+};
+
+void reporteBench(const BenchCuadro& b);
+
+// Estados de la partida: menu, jugando, pausa y fin de partida.
+enum EstadoPartida { E_MENU, E_JUGANDO, E_PAUSA, E_FIN };
+
+extern volatile std::sig_atomic_t senalSalir;
+void instalarSenales();
+
+// StateManager: maquina de estados. Menu -Enter-> jugando <-P-> pausa; vida 0 -> fin
+// de partida -Enter-> menu; Q sale desde cualquier estado. Solo en 'jugando' corre la logica.
+class StateManager {
+public:
+    EstadoPartida actual() const { return estado; }
+    void procesar(const Comando& c, bool& iniciarPartida, bool& salir);
+    void derrota() { estado = E_FIN; }
+    void forzarJugando() { estado = E_JUGANDO; }
+private:
+    EstadoPartida estado = E_MENU;
+};

@@ -33,12 +33,12 @@ g++ -std=c++17 -O2 main.cpp -o june -lncurses
 
 ## Equipo
 
-| Integrante | Carné |
-| :--- | :--- |
-| Andrés Rodríguez Orozco | 2026087874 |
-| Sebastián Marín Mora | 2026009715 |
-| Julián Solórzano Hernández | 2026086615 |
-| Abril González Morales | 2024207854 |
+| Integrante |
+| :--- |
+| Andrés Rodríguez Orozco |
+| Sebastián Marín Mora |
+| Julián Solórzano Hernández |
+| Abril González Morales |
 
 ## Licencia
 

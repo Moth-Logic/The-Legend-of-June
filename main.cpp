@@ -607,3 +607,215 @@ void InputBuffer::guardar(int tecla) {
     datos[(inicio + cantidad) % 8] = tecla;
     cantidad++;
 }
+// Saca la tecla mas antigua devuelve NINGUNA si la cola esta vacia.
+int InputBuffer::siguiente() {
+    if (cantidad == 0) return NINGUNA;
+    int t = datos[inicio];
+    inicio = (inicio + 1) % 8;
+    cantidad--;
+    return t;
+}
+
+// Busca la tecla en la tabla de controles devuelve false si la tecla no hace nada
+bool ActionMapper::traducir(int tecla, Comando& cmd) const {
+    switch (tecla) {
+    case KEY_UP: case 'w': case 'W': cmd = Comando{ MOVER, ARRIBA }; return true;
+    case KEY_DOWN: case 's': case 'S': cmd = Comando{ MOVER, ABAJO }; return true;
+    case KEY_LEFT: case 'a': case 'A': cmd = Comando{ MOVER, IZQUIERDA }; return true;
+    case KEY_RIGHT: case 'd': case 'D': cmd = Comando{ MOVER, DERECHA }; return true;
+    case ' ': case 'j': case 'J': cmd = Comando{ ATACAR, ARRIBA }; return true;
+    case 'p': case 'P': cmd = Comando{ PAUSA, ARRIBA }; return true;
+    case 'q': case 'Q': case TECLA_ESC: cmd = Comando{ SALIR, ARRIBA }; return true;
+    case '\n': case '\r': case KEY_ENTER: cmd = Comando{ ENTER, ARRIBA }; return true;
+    default: return false;
+    }
+}
+
+void InputHandler::iniciar() { teclado.iniciarNcurses(); }
+void InputHandler::cerrar() { teclado.cerrarNcurses(); }
+
+// Lee todas las teclas pendientes del cuadro las pasa por la cola y devuelve los
+// comandos resultantes al Game Engine
+std::vector<Comando> InputHandler::leerComandos() {
+    int t;
+    while ((t = teclado.leerTecla()) != NINGUNA)
+        cola.guardar(t);
+    std::vector<Comando> cmds;
+    while ((t = cola.siguiente()) != NINGUNA) {
+        Comando c;
+        if (mapa.traducir(t, c)) cmds.push_back(c);
+    }
+    return cmds;
+}
+
+// Entity System 
+// Agrega una entidad al final de los arreglos devuelve false si ya hay MAX_ENT
+bool Entidades::agregar(int t, int v, int32_t x, int32_t y, int32_t vx, int32_t vy) {
+    if (n >= MAX_ENT) return false;
+    uint32_t i = n++;
+    pos[2 * i] = prev[2 * i] = x;
+    pos[2 * i + 1] = prev[2 * i + 1] = y;
+    vel[2 * i] = vx;
+    vel[2 * i + 1] = vy;
+    vida[i] = v;
+    estado[i] = 0;
+    tipo[i] = t;
+    espera[i] = 0;
+    parpadeo[i] = 0;
+    inmune[i] = 0;
+    aturdido[i] = 0;
+    desvio[i] = 0;
+    desvioVel[2 * i] = desvioVel[2 * i + 1] = 0;
+    return true;
+}
+
+// Borra la entidad i copiando la ultima sobre ella y bajando la cantidad (sin huecos)
+void Entidades::eliminar(uint32_t i) {
+    uint32_t u = n - 1;
+    if (i != u) {
+        pos[2 * i] = pos[2 * u];
+        pos[2 * i + 1] = pos[2 * u + 1];
+        vel[2 * i] = vel[2 * u];
+        vel[2 * i + 1] = vel[2 * u + 1];
+        prev[2 * i] = prev[2 * u];
+        prev[2 * i + 1] = prev[2 * u + 1];
+        vida[i] = vida[u];
+        estado[i] = estado[u];
+        tipo[i] = tipo[u];
+        espera[i] = espera[u];
+        parpadeo[i] = parpadeo[u];
+        inmune[i] = inmune[u];
+        aturdido[i] = aturdido[u];
+        desvio[i] = desvio[u];
+        desvioVel[2 * i] = desvioVel[2 * u];
+        desvioVel[2 * i + 1] = desvioVel[2 * u + 1];
+    }
+    n--;
+}
+
+// Deja al jugador en la celda dada con vida completa y sin ataque ni invulnerabilidad
+void Jugador::reiniciar(int cx, int cy) {
+    pos[0] = prev[0] = aFijo(cx);
+    pos[1] = prev[1] = aFijo(cy);
+    vel[0] = vel[1] = 0;
+    vida = VIDA_JUGADOR;
+    inmune = espera = golpe = 0;
+    mira = ABAJO;
+    dirGolpe = ABAJO;
+    quiereX = quiereY = mantenerX = mantenerY = 0;
+    quiereAtacar = false;
+}
+
+// Guarda lo que el jugador quiere hacer este cuadro (direccion de movimiento y/o ataque)
+void Jugador::leerComandos(const std::vector<Comando>& cmds) {
+    quiereX = quiereY = 0;
+    quiereAtacar = false;
+    for (size_t i = 0; i < cmds.size(); i++) {
+        const Comando& c = cmds[i];
+        if (c.accion == ATACAR) {
+            quiereAtacar = true;
+        }
+        else if (c.accion == MOVER) {
+            mira = c.dir;
+            if (c.dir == IZQUIERDA) quiereX = -1;
+            else if (c.dir == DERECHA) quiereX = 1;
+            else if (c.dir == ARRIBA) quiereY = -1;
+            else quiereY = 1;
+        }
+    }
+}
+
+// Un cuadro del jugador: baja los contadores, fija la velocidad segun la direccion
+// (se mantiene MANTENER_TECLA cuadros tras soltar), guarda la posicion anterior
+// mueve con mover_entidades() y si ya paso la espera inicia el ataque
+void Jugador::actualizar() {
+    if (inmune > 0) inmune--;
+    if (espera > 0) espera--;
+    if (golpe > 0) golpe--;
+
+    if (quiereX != 0) {
+        vel[0] = quiereX * VEL_JUG_X;
+        mantenerX = MANTENER_TECLA;
+    }
+    else {
+        if (mantenerX > 0) mantenerX--;
+        if (mantenerX == 0) vel[0] = 0;
+    }
+    if (quiereY != 0) {
+        vel[1] = quiereY * VEL_JUG_Y;
+        mantenerY = MANTENER_TECLA;
+    }
+    else {
+        if (mantenerY > 0) mantenerY--;
+        if (mantenerY == 0) vel[1] = 0;
+    }
+
+    prev[0] = pos[0];
+    prev[1] = pos[1];
+    mover_entidades(pos, vel, 2);
+
+    if (quiereAtacar && espera == 0) {
+        golpe = GOLPE_DURACION;
+        dirGolpe = mira;
+        espera = GOLPE_ESPERA;
+    }
+    quiereAtacar = false;
+}
+
+// Resta 1 de vida y activa la invulnerabilidad (si no la tenia) devuelves true si la vida llego a 0
+bool Jugador::recibirDano() {
+    if (inmune > 0) return false;
+    vida--;
+    inmune = INMUNE_JUGADOR;
+    return vida <= 0;
+}
+
+Rect Jugador::rect() const { return Rect{ aCelda(pos[0]), aCelda(pos[1]), 1, 1 }; }
+
+// Zona de golpe: 3 celdas de ancho por 2 de profundidad delante del jugador segun hacia donde miro al atacar
+Rect Jugador::zonaGolpe() const {
+    int cx = aCelda(pos[0]), cy = aCelda(pos[1]);
+    switch (dirGolpe) {
+    case ARRIBA: return Rect{ cx - 1, cy - 2, 3, 2 };
+    case ABAJO: return Rect{ cx - 1, cy + 1, 3, 2 };
+    case IZQUIERDA: return Rect{ cx - 2, cy - 1, 2, 3 };
+    default: return Rect{ cx + 1, cy - 1, 2, 3 };
+    }
+}
+
+// Auxiliares de la IA: limitar()recorta d al rango [-v, v]; signo() devuelve -1, 0 o 1
+static int32_t limitar(int32_t d, int32_t v) { return d > v ? v : (d < -v ? -v : d); }
+static int32_t signo(int32_t d) { return d > 0 ? 1 : (d < 0 ? -1 : 0); }
+
+// Agrega un enemigo; los de ataque a distancia empiezan con una espera aleatoria antes del primer disparo.
+bool Enemigos::agregar(Entidades& e, int tipo, int vida, int32_t x, int32_t y) {
+    if (!e.agregar(tipo, vida, x, y, 0, 0)) return false;
+    if (tipo != SOLDADO) e.espera[e.n - 1] = 20 + std::rand() % 40;
+    return true;
+}
+
+//  - Herido o aturdido: se queda quieto
+//  - Soldado: persigue al jugador
+//  - Arquero: mantiene distancia y dispara en linea recta en la direccion cardinal
+//    donde la diferencia con el jugador es mayor cuando esta alineado y en rango
+//  - Mago: mantiene distancia y dispara un proyectil apuntando al jugador
+//  - Si quedo trabado contra un obstaculo, rodea durante DESVIO_CUADROS cuadros
+// 'disparar' es la funcion que entrega el Game Engine para crear proyectiles
+void Enemigos::actualizar(Entidades& e, const int32_t* jug, const FnDisparo& disparar) {
+    for (uint32_t i = 0; i < e.n; i++) {
+        int32_t* p = &e.pos[2 * i];
+        int32_t* v = &e.vel[2 * i];
+        if (e.espera[i] > 0) e.espera[i]--;
+        if (e.inmune[i] > 0) e.inmune[i]--;
+        if (e.parpadeo[i] > 0) {
+            e.parpadeo[i]--;
+            e.estado[i] = HERIDO;
+            v[0] = v[1] = 0;
+            continue;
+        }
+        if (e.aturdido[i] > 0) {
+            e.aturdido[i]--;
+            e.estado[i] = HERIDO;
+            v[0] = v[1] = 0;
+            continue;
+        }

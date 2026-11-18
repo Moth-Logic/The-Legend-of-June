@@ -1015,3 +1015,198 @@ void ASCIISpriteMgr::cargar() {
     marca = Sprite{ ".", 1, 1 };
     corazon = Sprite{ "<3", 2, 1 };
 }
+
+// Inicia los colores de ncurses (si la terminal los soporta). Con conPantalla=false no toca ncurses (modo bench).
+void Renderer::iniciar(bool conPantalla) {
+    sprites.cargar();
+    pantalla = conPantalla;
+    if (!pantalla) return;
+    hayColor = has_colors();
+    if (hayColor) {
+        start_color();
+        init_pair(C_ROJO, COLOR_RED, COLOR_BLACK);
+        init_pair(C_VERDE, COLOR_GREEN, COLOR_BLACK);
+        init_pair(C_AMARILLO, COLOR_YELLOW, COLOR_BLACK);
+        init_pair(C_MAGENTA, COLOR_MAGENTA, COLOR_BLACK);
+        init_pair(C_CIAN, COLOR_CYAN, COLOR_BLACK);
+        init_pair(C_BLANCO, COLOR_WHITE, COLOR_BLACK);
+        init_pair(C_AZUL, COLOR_BLUE, COLOR_BLACK);
+    }
+}
+
+// Llena el buffer de espacios; todavia no toca la pantalla.
+void Renderer::limpiar() {
+    memset(buf, ' ', sizeof(buf));
+    memset(col, C_BLANCO, sizeof(col));
+}
+
+// Capa 1: paredes de la arena.
+void Renderer::pintarArena(const Arena& arena) {
+    for (int y = 0; y < ARENA_H; y++) {
+        for (int x = 0; x < ARENA_W; x++) {
+            if (arena.esPared(x, y)) {
+                buf[ARENA_Y + y][ARENA_X + x] = '#';
+                col[ARENA_Y + y][ARENA_X + x] = C_AZUL;
+            }
+        }
+    }
+}
+
+// Copia un sprite al buffer con la rutina copiar_sprite() y le pone su color.
+void Renderer::pintarSprite(const Sprite& s, int cx, int cy, int color) {
+    DatosSprite d;
+    d.buffer = &buf[0][0];
+    d.bufAncho = PANT_W;
+    d.bufAlto = PANT_H;
+    d.sprite = s.datos;
+    d.spAncho = s.ancho;
+    d.spAlto = s.alto;
+    d.x = ARENA_X + cx;
+    d.y = ARENA_Y + cy;
+    copiar_sprite(&d);
+    for (int f = 0; f < s.alto; f++) {
+        for (int c = 0; c < s.ancho; c++) {
+            int bx = d.x + c, by = d.y + f;
+            if (bx < 0 || by < 0 || bx >= PANT_W || by >= PANT_H) continue;
+            if (s.datos[f * s.ancho + c] != ' ') col[by][bx] = (unsigned char)color;
+        }
+    }
+}
+
+// Capa 2: zona de golpe (o la marca de hacia donde mira), corazones, enemigos (los
+// heridos parpadean), proyectiles y por ultimo el jugador (parpadea si es invulnerable).
+void Renderer::pintarEntidades(const Arena& arena, const Jugador& j, const Entidades& enemigos, const Entidades& proy, const Entidades& corazones) {
+    int jx = aCelda(j.pos[0]), jy = aCelda(j.pos[1]);
+
+    if (j.golpeActivo()) {
+        Rect z = j.zonaGolpe();
+        for (int fy = z.y; fy < z.y + z.alto; fy++)
+            for (int fx = z.x; fx < z.x + z.ancho; fx++)
+                if (!arena.esPared(fx, fy) && arena.lineaLibre(jx, jy, fx, fy))
+                    pintarSprite(sprites.golpe, fx, fy, C_BLANCO);
+    }
+    else {
+        int mx = jx, my = jy;
+        if (j.mira == ARRIBA) my--;
+        else if (j.mira == ABAJO) my++;
+        else if (j.mira == IZQUIERDA) mx--;
+        else mx++;
+        if (!arena.esPared(mx, my)) pintarSprite(sprites.marca, mx, my, C_CIAN);
+    }
+
+    for (uint32_t i = 0; i < corazones.n; i++) {
+        if (corazones.espera[i] < CORAZON_PARPADEA && (corazones.espera[i] / 5) % 2 == 1) continue;
+        pintarSprite(sprites.corazon, aCelda(corazones.pos[2 * i]), aCelda(corazones.pos[2 * i + 1]), C_ROJO);
+    }
+
+    for (uint32_t i = 0; i < enemigos.n; i++) {
+        if (!ASCIISpriteMgr::visible(enemigos.parpadeo[i])) continue;
+        int cx = aCelda(enemigos.pos[2 * i]), cy = aCelda(enemigos.pos[2 * i + 1]);
+        if (enemigos.tipo[i] == SOLDADO) pintarSprite(sprites.soldado, cx, cy, C_ROJO);
+        else if (enemigos.tipo[i] == ARQUERO) pintarSprite(sprites.arquero, cx, cy, C_AMARILLO);
+        else pintarSprite(sprites.mago, cx, cy, C_MAGENTA);
+    }
+
+    for (uint32_t i = 0; i < proy.n; i++) {
+        int cx = aCelda(proy.pos[2 * i]), cy = aCelda(proy.pos[2 * i + 1]);
+        int32_t vx = proy.vel[2 * i], vy = proy.vel[2 * i + 1];
+        const Sprite& s = (vy == 0) ? sprites.protH : (vx == 0 ? sprites.protV : sprites.protM);
+        pintarSprite(s, cx, cy, C_CIAN);
+    }
+
+    if (j.inmune == 0 || (j.inmune / 3) % 2 == 0)
+        pintarSprite(sprites.jugador, jx, jy, C_VERDE);
+}
+
+// Escribe texto en el buffer en (x, y), recortando lo que se salga de la pantalla.
+void Renderer::texto(int x, int y, const std::string& s, int color) {
+    if (y < 0 || y >= PANT_H) return;
+    for (size_t i = 0; i < s.size(); i++) {
+        int cx = x + (int)i;
+        if (cx < 0 || cx >= PANT_W) continue;
+        buf[y][cx] = s[i];
+        col[y][cx] = (unsigned char)color;
+    }
+}
+
+// Igual que texto(), centrado horizontalmente.
+void Renderer::textoCentrado(int y, const std::string& s, int color) {
+    texto((PANT_W - (int)s.size()) / 2, y, s, color);
+}
+
+// La terminal debe ser de al menos 80x24.
+bool Renderer::terminalSuficiente() const { return LINES >= PANT_H && COLS >= PANT_W; }
+
+// Copia el buffer a ncurses y llama a refresh() UNA sola vez por cuadro.
+void Renderer::refrescar() {
+    if (!pantalla) return;
+    if (!terminalSuficiente()) {
+        erase();
+        mvprintw(0, 0, "Terminal muy pequena (%dx%d). Se necesita 80x24.", COLS, LINES);
+        refresh();
+        return;
+    }
+    for (int y = 0; y < PANT_H; y++) {
+        for (int x = 0; x < PANT_W; x++) {
+            int c = col[y][x];
+            if (hayColor) attrset(COLOR_PAIR(c) | (c == C_AZUL ? A_NORMAL : A_BOLD));
+            else attrset(A_NORMAL);
+            mvaddch(y, x, (chtype)(unsigned char)buf[y][x]);
+        }
+    }
+    refresh();
+}
+
+// Capa 3 (HUD): vida con corazones, oleada, enemigos que quedan, puntos, mapa y controles.
+void HUDManager::dibujar(Renderer& r, const DatosHUD& d) {
+    std::string v = "VIDA ";
+    for (int i = 0; i < VIDA_JUGADOR; i++) v += (i < d.vida) ? "<3 " : "-- ";
+    r.texto(1, 0, v, C_ROJO);
+    std::string o = "OLEADA " + std::to_string(d.oleada) + "   ENEMIGOS " + std::to_string(d.enemigos) +
+        "   PUNTOS " + std::to_string(d.puntaje);
+    r.texto(PANT_W - (int)o.size() - 1, 0, o, C_AMARILLO);
+    r.texto(1, 1, std::string("Mapa: ") + d.mapa, C_CIAN);
+    if (d.esperando) r.textoCentrado(1, "Preparate... oleada " + std::to_string(d.oleada + 1), C_CIAN);
+    r.textoCentrado(PANT_H - 1, "Mover: WASD/flechas   Atacar: ESPACIO   Pausa: P   Salir: Q", C_BLANCO);
+}
+
+// Pantalla de inicio: creditos del grupo, titulo, instrucciones y leyenda de enemigos.
+void HUDManager::menu(Renderer& r) {
+    r.textoCentrado(0, "Andres Rodriguez Orozco - 2026087874", C_CIAN);
+    r.textoCentrado(1, "Sebastian Marin Mora - 2026009715", C_CIAN);
+    r.textoCentrado(2, "Julian Solorzano Hernandez - 2026086615", C_CIAN);
+    r.textoCentrado(3, "Abril Gonzalez Morales - 2024207854", C_CIAN);
+    r.textoCentrado(5, "=== THE LEGEND OF JUNE ===", C_AMARILLO);
+    r.textoCentrado(7, "Sobrevive a oleadas de enemigos cada vez mas grandes", C_BLANCO);
+    r.textoCentrado(10, "Mover: WASD o flechas", C_BLANCO);
+    r.textoCentrado(11, "Atacar: ESPACIO (o J)", C_BLANCO);
+    r.textoCentrado(12, "Pausa: P     Salir: Q", C_BLANCO);
+    r.textoCentrado(14, "S = Soldado   A = Arquero   M = Mago", C_ROJO);
+    r.textoCentrado(15, "Los arqueros y magos disparan: esquiva los proyectiles", C_CIAN);
+    r.textoCentrado(16, "El mapa cambia al azar en cada oleada", C_AMARILLO);
+    r.textoCentrado(17, "A veces los enemigos sueltan corazones <3 : recogelos para curarte", C_ROJO);
+    r.textoCentrado(19, "Presiona ENTER para jugar", C_VERDE);
+}
+
+// Aviso de pausa.
+void HUDManager::pausa(Renderer& r) {
+    r.textoCentrado(11, "  PAUSA  ", C_AMARILLO);
+    r.textoCentrado(12, " P para continuar ", C_BLANCO);
+}
+
+// Pantalla de fin de partida con la oleada alcanzada y los puntos.
+void HUDManager::derrota(Renderer& r, const DatosHUD& d) {
+    r.textoCentrado(9, "  FIN DE PARTIDA  ", C_ROJO);
+    r.textoCentrado(11, " Llegaste a la oleada " + std::to_string(d.oleada) + " ", C_BLANCO);
+    r.textoCentrado(12, " Puntos: " + std::to_string(d.puntaje) + " ", C_BLANCO);
+    r.textoCentrado(14, " ENTER para volver al menu ", C_VERDE);
+}
+
+// Collision Detector 
+// Llama a colisiones() y devuelve la matriz de resultados (res[i*nb + j]).
+const uint8_t* CollisionDetector::comparar(const Rect* a, uint32_t na, const Rect* b, uint32_t nb) {
+    if (na > (uint32_t)MAX_ENT) na = MAX_ENT;
+    if (nb > (uint32_t)MAX_ENT) nb = MAX_ENT;
+    colisiones(a, na, b, nb, res);
+    return res;
+}

@@ -403,7 +403,7 @@ private:
 
 // GameEngine: director del juego. Es el unico que conecta los modulos entre si:
 // en cada cuadro lee comandos, actualiza entidades, revisa colisiones, pide la
-// siguiente oleada y dibuja (ver cuadro() y logica()).
+// siguiente oleada 
 class GameEngine {
 public:
     GameEngine() {}
@@ -446,9 +446,7 @@ private:
     void celdaLibreAleatoria(int& cx, int& cy) const;
 };
 
-// RUTINAS CRITICAS - version en C++ (referencia)
-// Con -DUSAR_ASM estas funciones no se compilan y se usan las de ensamblador
-// (Etapa 3). Sirven para verificar que el ensamblador da los mismos resultados.
+
 #ifndef USAR_ASM
 
 extern "C" {
@@ -494,7 +492,9 @@ void copiar_sprite(DatosSprite* d) {
 // IMPLEMENTACION
 
 // Arena 
-Arena::Arena() { generarPorDefecto(); }
+Arena::Arena() { 
+    generarPorDefecto(); 
+}
 
 // Rellena de paredes el rectangulo de celdas (x0,y0)-(x1,y1) (ambos inclusive).
 void Arena::bloque(int x0, int y0, int x1, int y1) {
@@ -596,7 +596,9 @@ int KeyboardReader::leerTecla() {
     return t == ERR ? NINGUNA : t;
 }
 
-void KeyboardReader::cerrarNcurses() { endwin(); }
+void KeyboardReader::cerrarNcurses() { 
+    endwin(); 
+}
 
 // Agrega la tecla al final de la cola circular; si esta llena descarta la mas vieja.
 void InputBuffer::guardar(int tecla) {

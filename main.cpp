@@ -1424,3 +1424,212 @@ void GameEngine::nuevaPartida(int mapaFijo) {
     esperando = true;
     pausaOleada = 20;
 }
+// Ciclo principal: ejecuta un cuadro y espera lo que falte hasta completar 33 ms.
+int GameEngine::ejecutar() {
+    inicializar();
+    while (!salir && !senalSalir) {
+        timespec inicio;
+        clock_gettime(CLOCK_MONOTONIC, &inicio);
+        cuadro();
+        controlarTiempo(inicio);
+    }
+    input.cerrar();
+    return 0;
+}
+
+// Un cuadro: procesa comandos y estados corre la logica solo si se esta jugando, y dibuja.
+void GameEngine::cuadro() {
+    std::vector<Comando> cmds = input.leerComandos();
+    bool iniciar = false;
+    for (size_t i = 0; i < cmds.size(); i++)
+        estados.procesar(cmds[i], iniciar, salir);
+    if (salir) return;
+    if (iniciar) nuevaPartida();
+    if (estados.actual() == E_JUGANDO) logica(cmds);
+    dibujar();
+}
+
+// Logica de un cuadro, siempre en este orden: (1) comandos al jugador, (2) actualizar
+// y mover entidades (3) colisiones (4) eliminar muertos y recoger corazones,
+// (5) pedir la siguiente oleada. Si el jugador murio pasa a fin de partida.
+void GameEngine::logica(const std::vector<Comando>& cmds) {
+    jugador.leerComandos(cmds);
+    actualizarEntidades();
+    bool murio = revisarColisiones();
+    limpiarMuertos();
+    recogerCorazones();
+    pedirOleada();
+    if (murio) estados.derrota();
+}
+
+// Jugador movimientos y acciones de los enemigos (con la funcion para crear proyectiles) y movimiento de enemigos y proyectiles.
+void GameEngine::actualizarEntidades() {
+    jugador.actualizar();
+    Enemigos::actualizar(enemigos, jugador.pos, [this](int32_t x, int32_t y, int32_t vx, int32_t vy) {
+        Proyectiles::crear(proyectiles, x, y, vx, vy);
+        });
+    Enemigos::mover(enemigos);
+    Proyectiles::mover(proyectiles);
+}
+
+// Aleja y aturde a un enemigo que acaba de tocar al jugador.
+void GameEngine::empujarEnemigo(uint32_t j) {
+    int32_t dx = enemigos.pos[2 * j] - jugador.pos[0];
+    int32_t dy = enemigos.pos[2 * j + 1] - jugador.pos[1];
+    int64_t m = std::max<int64_t>(std::abs(dx), 2 * (int64_t)std::abs(dy));
+    if (m == 0) {
+        dx = (std::rand() & 1) ? 1 : -1;
+        dy = 0;
+        m = 1;
+    }
+    int32_t px = (int32_t)((int64_t)dx * aFijo(EMPUJE_CELDAS) / m);
+    int32_t py = (int32_t)((int64_t)dy * aFijo(EMPUJE_CELDAS) / m);
+    CollisionDetector::desplazarSinPared(arena, &enemigos.pos[2 * j], &enemigos.prev[2 * j], px, py);
+    Enemigos::aturdir(enemigos, j, ATURDIR_CUADROS);
+}
+
+// Paredes (frenan al jugador y a los enemigos, destruyen proyectiles) y tres
+// comparaciones de rectangulos: jugador-enemigos (dano al jugador si no es
+// invulnerable), zona de golpe-enemigos (dano y parpadeo) y proyectiles-jugador
+// (dano y el proyectil desaparece) Devuelve true si el jugador murio.
+bool GameEngine::revisarColisiones() {
+
+    CollisionDetector::frenarContraPared(arena, jugador.pos, jugador.prev);
+    for (uint32_t i = 0; i < enemigos.n; i++)
+        CollisionDetector::frenarContraPared(arena, &enemigos.pos[2 * i], &enemigos.prev[2 * i]);
+    for (uint32_t i = 0; i < proyectiles.n; i++) {
+        if (arena.esPared(aCelda(proyectiles.pos[2 * i]), aCelda(proyectiles.pos[2 * i + 1])))
+            proyectiles.vida[i] = 0;
+    }
+
+    bool murio = false;
+    Rect rj = jugador.rect();
+    Rect re[MAX_ENT];
+    Rect rp[MAX_ENT];
+    for (uint32_t i = 0; i < enemigos.n; i++) re[i] = enemigos.rect(i);
+    for (uint32_t i = 0; i < proyectiles.n; i++) rp[i] = proyectiles.rect(i);
+
+    if (enemigos.n > 0) {
+        const uint8_t* res = colisionador.comparar(&rj, 1, re, enemigos.n);
+        bool hayContacto = false;
+        for (uint32_t j = 0; j < enemigos.n; j++)
+            if (res[j] && enemigos.vida[j] > 0) hayContacto = true;
+        if (hayContacto && jugador.inmune == 0) {
+            if (jugador.recibirDano()) murio = true;
+            for (uint32_t j = 0; j < enemigos.n; j++)
+                if (res[j] && enemigos.vida[j] > 0) empujarEnemigo(j);
+            for (uint32_t i = 0; i < enemigos.n; i++) re[i] = enemigos.rect(i);
+        }
+    }
+
+    if (jugador.golpeActivo() && enemigos.n > 0) {
+        Rect z = jugador.zonaGolpe();
+        const uint8_t* res = colisionador.comparar(&z, 1, re, enemigos.n);
+        for (uint32_t j = 0; j < enemigos.n; j++)
+            if (res[j] && arena.lineaLibre(aCelda(jugador.pos[0]), aCelda(jugador.pos[1]),
+                aCelda(enemigos.pos[2 * j]), aCelda(enemigos.pos[2 * j + 1])))
+                Enemigos::recibirDano(enemigos, j);
+    }
+
+    if (proyectiles.n > 0) {
+        const uint8_t* res = colisionador.comparar(rp, proyectiles.n, &rj, 1);
+        for (uint32_t i = 0; i < proyectiles.n; i++) {
+            if (res[i] && proyectiles.vida[i] > 0) {
+                if (jugador.recibirDano()) murio = true;
+                proyectiles.vida[i] = 0;
+            }
+        }
+    }
+    return murio;
+}
+
+// Elimina enemigos y proyectiles sin vida al final del cuadro cada enemigo da 10 puntos y puede soltar un corazon.
+void GameEngine::limpiarMuertos() {
+    for (uint32_t i = 0; i < enemigos.n;) {
+        if (enemigos.vida[i] <= 0) {
+            puntaje += 10;
+            if (std::rand() % 100 < PROB_CORAZON)
+                soltarCorazon(enemigos.pos[2 * i], enemigos.pos[2 * i + 1]);
+            enemigos.eliminar(i);
+        }
+        else {
+            i++;
+        }
+    }
+    for (uint32_t i = 0; i < proyectiles.n;) {
+        if (proyectiles.vida[i] <= 0) proyectiles.eliminar(i);
+        else i++;
+    }
+}
+
+// Crea un corazon en la celda del enemigo (ocupa 2 columnas: "<3") su vida util es VIDA_CORAZON cuadros.
+void GameEngine::soltarCorazon(int32_t x, int32_t y) {
+    int cx = aCelda(x), cy = aCelda(y);
+    if (arena.esPared(cx, cy)) arena.libreCerca(cx, cy);
+    if (arena.esPared(cx + 1, cy)) cx--;          // el corazon ocupa 2 columnas ("<3")
+    if (corazones.agregar(0, 1, aFijo(cx), aFijo(cy), 0, 0))
+        corazones.espera[corazones.n - 1] = VIDA_CORAZON;
+}
+
+// Cuenta regresiva de cada corazon si el jugador lo toca y tiene la vida incompleta
+// le suma 1 de vida y el corazon desaparece Tambien desaparece al agotarse su tiempo.
+void GameEngine::recogerCorazones() {
+    for (uint32_t i = 0; i < corazones.n;) {
+        if (corazones.espera[i] > 0) corazones.espera[i]--;
+        bool tomado = false;
+        if (corazones.espera[i] > 0 && jugador.vida < VIDA_JUGADOR) {
+            Rect rc{ aCelda(corazones.pos[2 * i]), aCelda(corazones.pos[2 * i + 1]), 2, 1 };
+            Rect rj = jugador.rect();
+            uint8_t toca = 0;
+            colisiones(&rj, 1, &rc, 1, &toca);     // misma rutina de colisiones del juego
+            if (toca) {
+                jugador.vida++;
+                tomado = true;
+            }
+        }
+        if (tomado || corazones.espera[i] <= 0) corazones.eliminar(i);
+        else i++;
+    }
+}
+
+// Si no quedan enemigos: la primera vez cambia de mapa y espera 45 cuadros despues
+// lanza la siguiente oleada.
+void GameEngine::pedirOleada() {
+    if (!oleadas.terminada(enemigos.n)) return;
+    if (!esperando) {
+        esperando = true;
+        pausaOleada = 45;
+        proyectiles.n = 0;
+        siguienteMapa();
+    }
+    else if (--pausaOleada <= 0) {
+        oleadas.lanzar(arena, aCelda(jugador.pos[0]), aCelda(jugador.pos[1]),
+            [this](int tipo, int vida, int32_t x, int32_t y) {
+                return Enemigos::agregar(enemigos, tipo, vida, x, y);
+            });
+        esperando = false;
+    }
+}
+
+// Arma el cuadro completo en el buffer: menu, o arena + entidades + HUD (y pausa/derrota encima).
+void GameEngine::pintar() {
+    render.limpiar();
+    EstadoPartida e = estados.actual();
+    if (e == E_MENU) {
+        HUDManager::menu(render);
+    }
+    else {
+        DatosHUD d;
+        d.vida = jugador.vida < 0 ? 0 : jugador.vida;
+        d.oleada = oleadas.oleadaActual();
+        d.enemigos = (int)enemigos.n;
+        d.puntaje = puntaje;
+        d.mapa = nombreMapa(mapa);
+        d.esperando = esperando && enemigos.n == 0;
+        render.pintarArena(arena);
+        render.pintarEntidades(arena, jugador, enemigos, proyectiles, corazones);
+        HUDManager::dibujar(render, d);
+        if (e == E_PAUSA) HUDManager::pausa(render);
+        if (e == E_FIN) HUDManager::derrota(render, d);
+    }
+}

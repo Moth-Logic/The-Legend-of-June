@@ -609,3 +609,606 @@ void InputBuffer::guardar(int tecla) {
     datos[(inicio + cantidad) % 8] = tecla;
     cantidad++;
 }
+// Saca la tecla mas antigua devuelve NINGUNA si la cola esta vacia.
+int InputBuffer::siguiente() {
+    if (cantidad == 0) return NINGUNA;
+    int t = datos[inicio];
+    inicio = (inicio + 1) % 8;
+    cantidad--;
+    return t;
+}
+
+// Busca la tecla en la tabla de controles devuelve false si la tecla no hace nada
+bool ActionMapper::traducir(int tecla, Comando& cmd) const {
+    switch (tecla) {
+    case KEY_UP: case 'w': case 'W': cmd = Comando{ MOVER, ARRIBA }; return true;
+    case KEY_DOWN: case 's': case 'S': cmd = Comando{ MOVER, ABAJO }; return true;
+    case KEY_LEFT: case 'a': case 'A': cmd = Comando{ MOVER, IZQUIERDA }; return true;
+    case KEY_RIGHT: case 'd': case 'D': cmd = Comando{ MOVER, DERECHA }; return true;
+    case ' ': case 'j': case 'J': cmd = Comando{ ATACAR, ARRIBA }; return true;
+    case 'p': case 'P': cmd = Comando{ PAUSA, ARRIBA }; return true;
+    case 'q': case 'Q': case TECLA_ESC: cmd = Comando{ SALIR, ARRIBA }; return true;
+    case '\n': case '\r': case KEY_ENTER: cmd = Comando{ ENTER, ARRIBA }; return true;
+    default: return false;
+    }
+}
+
+void InputHandler::iniciar() { teclado.iniciarNcurses(); }
+void InputHandler::cerrar() { teclado.cerrarNcurses(); }
+
+// Lee todas las teclas pendientes del cuadro las pasa por la cola y devuelve los
+// comandos resultantes al Game Engine
+std::vector<Comando> InputHandler::leerComandos() {
+    int t;
+    while ((t = teclado.leerTecla()) != NINGUNA)
+        cola.guardar(t);
+    std::vector<Comando> cmds;
+    while ((t = cola.siguiente()) != NINGUNA) {
+        Comando c;
+        if (mapa.traducir(t, c)) cmds.push_back(c);
+    }
+    return cmds;
+}
+
+// Entity System 
+// Agrega una entidad al final de los arreglos devuelve false si ya hay MAX_ENT
+bool Entidades::agregar(int t, int v, int32_t x, int32_t y, int32_t vx, int32_t vy) {
+    if (n >= MAX_ENT) return false;
+    uint32_t i = n++;
+    pos[2 * i] = prev[2 * i] = x;
+    pos[2 * i + 1] = prev[2 * i + 1] = y;
+    vel[2 * i] = vx;
+    vel[2 * i + 1] = vy;
+    vida[i] = v;
+    estado[i] = 0;
+    tipo[i] = t;
+    espera[i] = 0;
+    parpadeo[i] = 0;
+    inmune[i] = 0;
+    aturdido[i] = 0;
+    desvio[i] = 0;
+    desvioVel[2 * i] = desvioVel[2 * i + 1] = 0;
+    return true;
+}
+
+// Borra la entidad i copiando la ultima sobre ella y bajando la cantidad (sin huecos)
+void Entidades::eliminar(uint32_t i) {
+    uint32_t u = n - 1;
+    if (i != u) {
+        pos[2 * i] = pos[2 * u];
+        pos[2 * i + 1] = pos[2 * u + 1];
+        vel[2 * i] = vel[2 * u];
+        vel[2 * i + 1] = vel[2 * u + 1];
+        prev[2 * i] = prev[2 * u];
+        prev[2 * i + 1] = prev[2 * u + 1];
+        vida[i] = vida[u];
+        estado[i] = estado[u];
+        tipo[i] = tipo[u];
+        espera[i] = espera[u];
+        parpadeo[i] = parpadeo[u];
+        inmune[i] = inmune[u];
+        aturdido[i] = aturdido[u];
+        desvio[i] = desvio[u];
+        desvioVel[2 * i] = desvioVel[2 * u];
+        desvioVel[2 * i + 1] = desvioVel[2 * u + 1];
+    }
+    n--;
+}
+
+// Deja al jugador en la celda dada con vida completa y sin ataque ni invulnerabilidad
+void Jugador::reiniciar(int cx, int cy) {
+    pos[0] = prev[0] = aFijo(cx);
+    pos[1] = prev[1] = aFijo(cy);
+    vel[0] = vel[1] = 0;
+    vida = VIDA_JUGADOR;
+    inmune = espera = golpe = 0;
+    mira = ABAJO;
+    dirGolpe = ABAJO;
+    quiereX = quiereY = mantenerX = mantenerY = 0;
+    quiereAtacar = false;
+}
+
+// Guarda lo que el jugador quiere hacer este cuadro (direccion de movimiento y/o ataque)
+void Jugador::leerComandos(const std::vector<Comando>& cmds) {
+    quiereX = quiereY = 0;
+    quiereAtacar = false;
+    for (size_t i = 0; i < cmds.size(); i++) {
+        const Comando& c = cmds[i];
+        if (c.accion == ATACAR) {
+            quiereAtacar = true;
+        }
+        else if (c.accion == MOVER) {
+            mira = c.dir;
+            if (c.dir == IZQUIERDA) quiereX = -1;
+            else if (c.dir == DERECHA) quiereX = 1;
+            else if (c.dir == ARRIBA) quiereY = -1;
+            else quiereY = 1;
+        }
+    }
+}
+
+// Un cuadro del jugador: baja los contadores, fija la velocidad segun la direccion
+// (se mantiene MANTENER_TECLA cuadros tras soltar), guarda la posicion anterior
+// mueve con mover_entidades() y si ya paso la espera inicia el ataque
+void Jugador::actualizar() {
+    if (inmune > 0) inmune--;
+    if (espera > 0) espera--;
+    if (golpe > 0) golpe--;
+
+    if (quiereX != 0) {
+        vel[0] = quiereX * VEL_JUG_X;
+        mantenerX = MANTENER_TECLA;
+    }
+    else {
+        if (mantenerX > 0) mantenerX--;
+        if (mantenerX == 0) vel[0] = 0;
+    }
+    if (quiereY != 0) {
+        vel[1] = quiereY * VEL_JUG_Y;
+        mantenerY = MANTENER_TECLA;
+    }
+    else {
+        if (mantenerY > 0) mantenerY--;
+        if (mantenerY == 0) vel[1] = 0;
+    }
+
+    prev[0] = pos[0];
+    prev[1] = pos[1];
+    mover_entidades(pos, vel, 2);
+
+    if (quiereAtacar && espera == 0) {
+        golpe = GOLPE_DURACION;
+        dirGolpe = mira;
+        espera = GOLPE_ESPERA;
+    }
+    quiereAtacar = false;
+}
+
+// Resta 1 de vida y activa la invulnerabilidad (si no la tenia) devuelves true si la vida llego a 0
+bool Jugador::recibirDano() {
+    if (inmune > 0) return false;
+    vida--;
+    inmune = INMUNE_JUGADOR;
+    return vida <= 0;
+}
+
+Rect Jugador::rect() const { return Rect{ aCelda(pos[0]), aCelda(pos[1]), 1, 1 }; }
+
+// Zona de golpe: 3 celdas de ancho por 2 de profundidad delante del jugador segun hacia donde miro al atacar
+Rect Jugador::zonaGolpe() const {
+    int cx = aCelda(pos[0]), cy = aCelda(pos[1]);
+    switch (dirGolpe) {
+    case ARRIBA: return Rect{ cx - 1, cy - 2, 3, 2 };
+    case ABAJO: return Rect{ cx - 1, cy + 1, 3, 2 };
+    case IZQUIERDA: return Rect{ cx - 2, cy - 1, 2, 3 };
+    default: return Rect{ cx + 1, cy - 1, 2, 3 };
+    }
+}
+
+// Auxiliares de la IA: limitar()recorta d al rango [-v, v]; signo() devuelve -1, 0 o 1
+static int32_t limitar(int32_t d, int32_t v) { return d > v ? v : (d < -v ? -v : d); }
+static int32_t signo(int32_t d) { return d > 0 ? 1 : (d < 0 ? -1 : 0); }
+
+// Agrega un enemigo; los de ataque a distancia empiezan con una espera aleatoria antes del primer disparo.
+bool Enemigos::agregar(Entidades& e, int tipo, int vida, int32_t x, int32_t y) {
+    if (!e.agregar(tipo, vida, x, y, 0, 0)) return false;
+    if (tipo != SOLDADO) e.espera[e.n - 1] = 20 + std::rand() % 40;
+    return true;
+}
+
+//  - Herido o aturdido: se queda quieto
+//  - Soldado: persigue al jugador
+//  - Arquero: mantiene distancia y dispara en linea recta en la direccion cardinal
+//    donde la diferencia con el jugador es mayor cuando esta alineado y en rango
+//  - Mago: mantiene distancia y dispara un proyectil apuntando al jugador
+//  - Si quedo trabado contra un obstaculo, rodea durante DESVIO_CUADROS cuadros
+// 'disparar' es la funcion que entrega el Game Engine para crear proyectiles
+void Enemigos::actualizar(Entidades& e, const int32_t* jug, const FnDisparo& disparar) {
+    for (uint32_t i = 0; i < e.n; i++) {
+        int32_t* p = &e.pos[2 * i];
+        int32_t* v = &e.vel[2 * i];
+        if (e.espera[i] > 0) e.espera[i]--;
+        if (e.inmune[i] > 0) e.inmune[i]--;
+        if (e.parpadeo[i] > 0) {
+            e.parpadeo[i]--;
+            e.estado[i] = HERIDO;
+            v[0] = v[1] = 0;
+            continue;
+        }
+        if (e.aturdido[i] > 0) {
+            e.aturdido[i]--;
+            e.estado[i] = HERIDO;
+            v[0] = v[1] = 0;
+            continue;
+        }
+        
+        int32_t ovx = v[0], ovy = v[1];
+        bool trabado = (ovx != 0 || ovy != 0) && p[0] == e.prev[2 * i] && p[1] == e.prev[2 * i + 1];
+
+        int32_t dx = jug[0] - p[0], dy = jug[1] - p[1];
+        int adx = std::abs(dx) >> FP_BITS, ady = std::abs(dy) >> FP_BITS;
+        int dist = std::max(adx, 2 * ady);
+
+        if (e.tipo[i] == SOLDADO) {
+            e.estado[i] = PERSEGUIR;
+            v[0] = limitar(dx, VEL_SOL_X);
+            v[1] = limitar(dy, VEL_SOL_Y);
+        }
+        else if (e.tipo[i] == ARQUERO) {
+            bool horiz = std::abs(dx) >= std::abs(dy);
+            if (horiz) {
+                v[1] = limitar(dy, VEL_ARQ_Y);
+                if (adx > 14) v[0] = signo(dx) * VEL_ARQ_X;
+                else if (adx < 8) v[0] = -signo(dx) * VEL_ARQ_X;
+                else v[0] = 0;
+            }
+            else {
+                v[0] = limitar(dx, VEL_ARQ_X);
+                if (ady > 7) v[1] = signo(dy) * VEL_ARQ_Y;
+                else if (ady < 3) v[1] = -signo(dy) * VEL_ARQ_Y;
+                else v[1] = 0;
+            }
+            e.estado[i] = (v[0] == 0 && v[1] == 0) ? DISPARAR : PERSEGUIR;
+
+            bool alineado = horiz ? aCelda(p[1]) == aCelda(jug[1]) : aCelda(p[0]) == aCelda(jug[0]);
+            bool enRango = horiz ? adx <= 28 : ady <= 14;
+            if (e.espera[i] == 0 && alineado && enRango) {
+                int32_t vx = 0, vy = 0;
+                if (horiz) vx = signo(dx) * VEL_PROY_X;
+                else vy = signo(dy) * VEL_PROY_Y;
+                disparar(p[0], p[1], vx, vy);
+                e.espera[i] = 60;
+                e.estado[i] = DISPARAR;
+            }
+        }
+        else {
+            if (dist > 18) {
+                v[0] = signo(dx) * VEL_MAG_X;
+                v[1] = signo(dy) * VEL_MAG_Y;
+            }
+            else if (dist < 10) {
+                v[0] = -signo(dx) * VEL_MAG_X;
+                v[1] = -signo(dy) * VEL_MAG_Y;
+            }
+            else {
+                v[0] = v[1] = 0;
+            }
+            e.estado[i] = (v[0] == 0 && v[1] == 0) ? DISPARAR : PERSEGUIR;
+
+            if (e.espera[i] == 0 && dist <= 30) {
+                int64_t m = std::max<int64_t>(std::abs(dx), 2 * (int64_t)std::abs(dy));
+                if (m == 0) m = 1;
+                int32_t vx = (int32_t)((int64_t)dx * VEL_PROY_X / m);
+                int32_t vy = (int32_t)((int64_t)dy * VEL_PROY_X / m);
+                disparar(p[0], p[1], vx, vy);
+                e.espera[i] = 80;
+                e.estado[i] = DISPARAR;
+            }
+        }
+
+        if (e.desvio[i] > 0) {
+            e.desvio[i]--;
+            v[0] = e.desvioVel[2 * i];
+            v[1] = e.desvioVel[2 * i + 1];
+        }
+        else if (trabado) {
+            int s = (std::rand() & 1) ? 1 : -1;
+            e.desvio[i] = DESVIO_CUADROS;
+            if (std::abs(ovx) >= 2 * std::abs(ovy)) {
+                e.desvioVel[2 * i] = 0;
+                e.desvioVel[2 * i + 1] = s * std::max(std::abs(ovx) / 2, 1);
+            }
+            else {
+                e.desvioVel[2 * i] = s * std::max(std::abs(ovy) * 2, 1);
+                e.desvioVel[2 * i + 1] = 0;
+            }
+            v[0] = e.desvioVel[2 * i];
+            v[1] = e.desvioVel[2 * i + 1];
+        }
+    }
+}
+
+// Guarda las posiciones actuales como anteriores y mueve TODOS los enemigos con una sola llamada a mover_entidades().
+void Enemigos::mover(Entidades& e) {
+    memcpy(e.prev, e.pos, sizeof(int32_t) * 2 * e.n);
+    mover_entidades(e.pos, e.vel, 2 * e.n);
+}
+
+// Resta vida, activa parpadeo e inmunidad corta. Devuelve true si la vida llego a 0 (se elimina al final del cuadro).
+bool Enemigos::recibirDano(Entidades& e, uint32_t i) {
+    if (e.inmune[i] > 0 || e.vida[i] <= 0) return false;
+    e.vida[i]--;
+    e.parpadeo[i] = PARPADEO_CUADROS;
+    e.inmune[i] = INMUNE_ENEMIGO;
+    e.estado[i] = HERIDO;
+    return e.vida[i] <= 0;
+}
+
+// Detiene al enemigo durante 'cuadros' cuadros (despues de tocar al jugador).
+void Enemigos::aturdir(Entidades& e, uint32_t i, int cuadros) {
+    e.aturdido[i] = cuadros;
+    e.vel[2 * i] = e.vel[2 * i + 1] = 0;
+}
+
+// Crea un proyectil en la posicion del enemigo que disparo, con la velocidad dada.
+void Proyectiles::crear(Entidades& p, int32_t x, int32_t y, int32_t vx, int32_t vy) {
+    p.agregar(0, 1, x, y, vx, vy);
+}
+
+// Avanza todos los proyectiles en linea recta con una sola llamada a mover_entidades().
+void Proyectiles::mover(Entidades& p) {
+    memcpy(p.prev, p.pos, sizeof(int32_t) * 2 * p.n);
+    mover_entidades(p.pos, p.vel, 2 * p.n);
+}
+
+// Wave Manager 
+// En la oleada n salen 2n-1 enemigos (1, 3, 5, 7...), con tope de 60.
+int DifficultyScaler::cantidad(int oleada) const {
+    return std::min(2 * oleada - 1, 60);
+}
+
+// Tipo del enemigo numero i de la oleada. Oleada 1: solo Soldado. Oleada 2: Soldado,
+// Arquero y Mago. Desde la 3: uno de cada tres es de distancia (Arqueros; desde la 5
+// alternan con Magos).
+int DifficultyScaler::tipo(int oleada, int i) const {
+    if (oleada == 2) return i == 1 ? ARQUERO : (i == 2 ? MAGO : SOLDADO);   // 2da oleada: Soldado + Arquero + Mago
+    if (oleada < 3 || i % 3 != 2) return SOLDADO;
+    if (oleada < 5) return ARQUERO;
+    return ((i / 3) % 2 == 0) ? ARQUERO : MAGO;
+}
+
+// Vida base 2 (Mago 3), mas 1 cada 5 oleadas.
+int DifficultyScaler::vida(int oleada, int tipo) const {
+    int base = (tipo == MAGO) ? 3 : 2;
+    return base + (oleada - 1) / 5;
+}
+
+// Elige una celda libre al azar y lejos del jugador (si no encuentra, usa la primera libre).
+void EnemySpawner::elegirPunto(const Arena& arena, int jx, int jy, int& cx, int& cy) const {
+    for (int intento = 0; intento < 300; intento++) {
+        int x = 1 + std::rand() % (ARENA_W - 2);
+        int y = 1 + std::rand() % (ARENA_H - 2);
+        if (arena.esPared(x, y)) continue;
+        if (std::max(std::abs(x - jx), 2 * std::abs(y - jy)) < 16) continue;
+        cx = x;
+        cy = y;
+        return;
+    }
+    for (int y = 1; y < ARENA_H - 1; y++) {
+        for (int x = 1; x < ARENA_W - 1; x++) {
+            if (!arena.esPared(x, y)) {
+                cx = x;
+                cy = y;
+                return;
+            }
+        }
+    }
+}
+
+// Crea el enemigo en la celda indicada usando la funcion de agregar que dio el Game Engine.
+bool EnemySpawner::crear(int tipo, int vida, int cx, int cy, const FnAgregar& agregar) const {
+    return agregar(tipo, vida, aFijo(cx), aFijo(cy));
+}
+
+// Sube el numero de oleada y crea todos sus enemigos.
+void WaveManager::lanzar(const Arena& arena, int jx, int jy, const FnAgregar& agregar) {
+    contador.subir();
+    int o = contador.actual();
+    int n = dificultad.cantidad(o);
+    for (int i = 0; i < n; i++) {
+        int t = dificultad.tipo(o, i);
+        int cx = 1, cy = 1;
+        spawner.elegirPunto(arena, jx, jy, cx, cy);
+        spawner.crear(t, dificultad.vida(o, t), cx, cy, agregar);
+    }
+}
+
+// Render System 
+// Define los dibujos: @ jugador, S soldado, A arquero, M mago, - | * proyectiles, + golpe, <3 corazon.
+void ASCIISpriteMgr::cargar() {
+    jugador = Sprite{ "@", 1, 1 };
+    soldado = Sprite{ "S", 1, 1 };
+    arquero = Sprite{ "A", 1, 1 };
+    mago = Sprite{ "M", 1, 1 };
+    protH = Sprite{ "-", 1, 1 };
+    protV = Sprite{ "|", 1, 1 };
+    protM = Sprite{ "*", 1, 1 };
+    golpe = Sprite{ "+", 1, 1 };
+    marca = Sprite{ ".", 1, 1 };
+    corazon = Sprite{ "<3", 2, 1 };
+}
+
+// Inicia los colores de ncurses (si la terminal los soporta). Con conPantalla=false no toca ncurses (modo bench).
+void Renderer::iniciar(bool conPantalla) {
+    sprites.cargar();
+    pantalla = conPantalla;
+    if (!pantalla) return;
+    hayColor = has_colors();
+    if (hayColor) {
+        start_color();
+        init_pair(C_ROJO, COLOR_RED, COLOR_BLACK);
+        init_pair(C_VERDE, COLOR_GREEN, COLOR_BLACK);
+        init_pair(C_AMARILLO, COLOR_YELLOW, COLOR_BLACK);
+        init_pair(C_MAGENTA, COLOR_MAGENTA, COLOR_BLACK);
+        init_pair(C_CIAN, COLOR_CYAN, COLOR_BLACK);
+        init_pair(C_BLANCO, COLOR_WHITE, COLOR_BLACK);
+        init_pair(C_AZUL, COLOR_BLUE, COLOR_BLACK);
+    }
+}
+
+// Llena el buffer de espacios; todavia no toca la pantalla.
+void Renderer::limpiar() {
+    memset(buf, ' ', sizeof(buf));
+    memset(col, C_BLANCO, sizeof(col));
+}
+
+// Capa 1: paredes de la arena.
+void Renderer::pintarArena(const Arena& arena) {
+    for (int y = 0; y < ARENA_H; y++) {
+        for (int x = 0; x < ARENA_W; x++) {
+            if (arena.esPared(x, y)) {
+                buf[ARENA_Y + y][ARENA_X + x] = '#';
+                col[ARENA_Y + y][ARENA_X + x] = C_AZUL;
+            }
+        }
+    }
+}
+
+// Copia un sprite al buffer con la rutina copiar_sprite() y le pone su color.
+void Renderer::pintarSprite(const Sprite& s, int cx, int cy, int color) {
+    DatosSprite d;
+    d.buffer = &buf[0][0];
+    d.bufAncho = PANT_W;
+    d.bufAlto = PANT_H;
+    d.sprite = s.datos;
+    d.spAncho = s.ancho;
+    d.spAlto = s.alto;
+    d.x = ARENA_X + cx;
+    d.y = ARENA_Y + cy;
+    copiar_sprite(&d);
+    for (int f = 0; f < s.alto; f++) {
+        for (int c = 0; c < s.ancho; c++) {
+            int bx = d.x + c, by = d.y + f;
+            if (bx < 0 || by < 0 || bx >= PANT_W || by >= PANT_H) continue;
+            if (s.datos[f * s.ancho + c] != ' ') col[by][bx] = (unsigned char)color;
+        }
+    }
+}
+
+// Capa 2: zona de golpe (o la marca de hacia donde mira), corazones, enemigos (los
+// heridos parpadean), proyectiles y por ultimo el jugador (parpadea si es invulnerable).
+void Renderer::pintarEntidades(const Arena& arena, const Jugador& j, const Entidades& enemigos, const Entidades& proy, const Entidades& corazones) {
+    int jx = aCelda(j.pos[0]), jy = aCelda(j.pos[1]);
+
+    if (j.golpeActivo()) {
+        Rect z = j.zonaGolpe();
+        for (int fy = z.y; fy < z.y + z.alto; fy++)
+            for (int fx = z.x; fx < z.x + z.ancho; fx++)
+                if (!arena.esPared(fx, fy) && arena.lineaLibre(jx, jy, fx, fy))
+                    pintarSprite(sprites.golpe, fx, fy, C_BLANCO);
+    }
+    else {
+        int mx = jx, my = jy;
+        if (j.mira == ARRIBA) my--;
+        else if (j.mira == ABAJO) my++;
+        else if (j.mira == IZQUIERDA) mx--;
+        else mx++;
+        if (!arena.esPared(mx, my)) pintarSprite(sprites.marca, mx, my, C_CIAN);
+    }
+
+    for (uint32_t i = 0; i < corazones.n; i++) {
+        if (corazones.espera[i] < CORAZON_PARPADEA && (corazones.espera[i] / 5) % 2 == 1) continue;
+        pintarSprite(sprites.corazon, aCelda(corazones.pos[2 * i]), aCelda(corazones.pos[2 * i + 1]), C_ROJO);
+    }
+
+    for (uint32_t i = 0; i < enemigos.n; i++) {
+        if (!ASCIISpriteMgr::visible(enemigos.parpadeo[i])) continue;
+        int cx = aCelda(enemigos.pos[2 * i]), cy = aCelda(enemigos.pos[2 * i + 1]);
+        if (enemigos.tipo[i] == SOLDADO) pintarSprite(sprites.soldado, cx, cy, C_ROJO);
+        else if (enemigos.tipo[i] == ARQUERO) pintarSprite(sprites.arquero, cx, cy, C_AMARILLO);
+        else pintarSprite(sprites.mago, cx, cy, C_MAGENTA);
+    }
+
+    for (uint32_t i = 0; i < proy.n; i++) {
+        int cx = aCelda(proy.pos[2 * i]), cy = aCelda(proy.pos[2 * i + 1]);
+        int32_t vx = proy.vel[2 * i], vy = proy.vel[2 * i + 1];
+        const Sprite& s = (vy == 0) ? sprites.protH : (vx == 0 ? sprites.protV : sprites.protM);
+        pintarSprite(s, cx, cy, C_CIAN);
+    }
+
+    if (j.inmune == 0 || (j.inmune / 3) % 2 == 0)
+        pintarSprite(sprites.jugador, jx, jy, C_VERDE);
+}
+
+// Escribe texto en el buffer en (x, y), recortando lo que se salga de la pantalla.
+void Renderer::texto(int x, int y, const std::string& s, int color) {
+    if (y < 0 || y >= PANT_H) return;
+    for (size_t i = 0; i < s.size(); i++) {
+        int cx = x + (int)i;
+        if (cx < 0 || cx >= PANT_W) continue;
+        buf[y][cx] = s[i];
+        col[y][cx] = (unsigned char)color;
+    }
+}
+
+// Igual que texto(), centrado horizontalmente.
+void Renderer::textoCentrado(int y, const std::string& s, int color) {
+    texto((PANT_W - (int)s.size()) / 2, y, s, color);
+}
+
+// La terminal debe ser de al menos 80x24.
+bool Renderer::terminalSuficiente() const { return LINES >= PANT_H && COLS >= PANT_W; }
+
+// Copia el buffer a ncurses y llama a refresh() UNA sola vez por cuadro.
+void Renderer::refrescar() {
+    if (!pantalla) return;
+    if (!terminalSuficiente()) {
+        erase();
+        mvprintw(0, 0, "Terminal muy pequena (%dx%d). Se necesita 80x24.", COLS, LINES);
+        refresh();
+        return;
+    }
+    for (int y = 0; y < PANT_H; y++) {
+        for (int x = 0; x < PANT_W; x++) {
+            int c = col[y][x];
+            if (hayColor) attrset(COLOR_PAIR(c) | (c == C_AZUL ? A_NORMAL : A_BOLD));
+            else attrset(A_NORMAL);
+            mvaddch(y, x, (chtype)(unsigned char)buf[y][x]);
+        }
+    }
+    refresh();
+}
+
+// Capa 3 (HUD): vida con corazones, oleada, enemigos que quedan, puntos, mapa y controles.
+void HUDManager::dibujar(Renderer& r, const DatosHUD& d) {
+    std::string v = "VIDA ";
+    for (int i = 0; i < VIDA_JUGADOR; i++) v += (i < d.vida) ? "<3 " : "-- ";
+    r.texto(1, 0, v, C_ROJO);
+    std::string o = "OLEADA " + std::to_string(d.oleada) + "   ENEMIGOS " + std::to_string(d.enemigos) +
+        "   PUNTOS " + std::to_string(d.puntaje);
+    r.texto(PANT_W - (int)o.size() - 1, 0, o, C_AMARILLO);
+    r.texto(1, 1, std::string("Mapa: ") + d.mapa, C_CIAN);
+    if (d.esperando) r.textoCentrado(1, "Preparate... oleada " + std::to_string(d.oleada + 1), C_CIAN);
+    r.textoCentrado(PANT_H - 1, "Mover: WASD/flechas   Atacar: ESPACIO   Pausa: P   Salir: Q", C_BLANCO);
+}
+
+// Pantalla de inicio: creditos del grupo, titulo, instrucciones y leyenda de enemigos.
+void HUDManager::menu(Renderer& r) {
+    r.textoCentrado(0, "Andres Rodriguez Orozco - 2026087874", C_CIAN);
+    r.textoCentrado(1, "Sebastian Marin Mora - 2026009715", C_CIAN);
+    r.textoCentrado(2, "Julian Solorzano Hernandez - 2026086615", C_CIAN);
+    r.textoCentrado(3, "Abril Gonzalez Morales - 2024207854", C_CIAN);
+    r.textoCentrado(5, "=== THE LEGEND OF JUNE ===", C_AMARILLO);
+    r.textoCentrado(7, "Sobrevive a oleadas de enemigos cada vez mas grandes", C_BLANCO);
+    r.textoCentrado(10, "Mover: WASD o flechas", C_BLANCO);
+    r.textoCentrado(11, "Atacar: ESPACIO (o J)", C_BLANCO);
+    r.textoCentrado(12, "Pausa: P     Salir: Q", C_BLANCO);
+    r.textoCentrado(14, "S = Soldado   A = Arquero   M = Mago", C_ROJO);
+    r.textoCentrado(15, "Los arqueros y magos disparan: esquiva los proyectiles", C_CIAN);
+    r.textoCentrado(16, "El mapa cambia al azar en cada oleada", C_AMARILLO);
+    r.textoCentrado(17, "A veces los enemigos sueltan corazones <3 : recogelos para curarte", C_ROJO);
+    r.textoCentrado(19, "Presiona ENTER para jugar", C_VERDE);
+}
+
+// Aviso de pausa.
+void HUDManager::pausa(Renderer& r) {
+    r.textoCentrado(11, "  PAUSA  ", C_AMARILLO);
+    r.textoCentrado(12, " P para continuar ", C_BLANCO);
+}
+
+// Pantalla de fin de partida con la oleada alcanzada y los puntos.
+void HUDManager::derrota(Renderer& r, const DatosHUD& d) {
+    r.textoCentrado(9, "  FIN DE PARTIDA  ", C_ROJO);
+    r.textoCentrado(11, " Llegaste a la oleada " + std::to_string(d.oleada) + " ", C_BLANCO);
+    r.textoCentrado(12, " Puntos: " + std::to_string(d.puntaje) + " ", C_BLANCO);
+    r.textoCentrado(14, " ENTER para volver al menu ", C_VERDE);
+}
+
+// Collision Detector 
+// Llama a colisiones() y devuelve la matriz de resultados (res[i*nb + j]).
+const uint8_t* CollisionDetector::comparar(const Rect* a, uint32_t na, const Rect* b, uint32_t nb) {
+    if (na > (uint32_t)MAX_ENT) na = MAX_ENT;
+    if (nb > (uint32_t)MAX_ENT) nb = MAX_ENT;
+    colisiones(a, na, b, nb, res);
+    return res;
+}

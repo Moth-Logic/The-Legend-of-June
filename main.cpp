@@ -1212,3 +1212,215 @@ const uint8_t* CollisionDetector::comparar(const Rect* a, uint32_t na, const Rec
     colisiones(a, na, b, nb, res);
     return res;
 }
+
+
+// Si la entidad quedo dentro de una pared, la regresa a su posicion anterior; primero
+// intenta conservar un eje para que pueda deslizarse a lo largo de la pared.
+void CollisionDetector::frenarContraPared(const Arena& arena, int32_t* p, const int32_t* q) {
+    int cx = aCelda(p[0]), cy = aCelda(p[1]);
+    if (!arena.esPared(cx, cy)) return;
+    int qx = aCelda(q[0]), qy = aCelda(q[1]);
+    if (!arena.esPared(cx, qy)) {
+        p[1] = q[1];
+    } else if (!arena.esPared(qx, cy)) {
+        p[0] = q[0];
+    } else {
+        p[0] = q[0];
+        p[1] = q[1];
+    }
+}
+
+// Desplaza una entidad (empuje) en 8 pasos, deteniendose antes de entrar en una pared.
+void CollisionDetector::desplazarSinPared(const Arena& arena, int32_t* pos, int32_t* prev, int32_t dx, int32_t dy) {
+    const int PASOS = 8;
+    for (int k = 0; k < PASOS; k++) {
+        int32_t nx = pos[0] + dx / PASOS, ny = pos[1] + dy / PASOS;
+        if (arena.esPared(aCelda(nx), aCelda(ny))) break;
+        pos[0] = nx;
+        pos[1] = ny;
+    }
+    prev[0] = pos[0];
+    prev[1] = pos[1];
+}
+
+// Modo de rendimiento (--bench) 
+// Tiempo actual en nanosegundos (CLOCK_MONOTONIC).
+static long long ahoraNs() {
+    timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+// Mide (en microsegundos) el trabajo de mover_entidades() de un cuadro: jugador + n enemigos + n proyectiles.
+static double medirMover(int n, int reps) {
+    std::vector<int32_t> pj(2, 0), vj(2, 3), pe(2 * n, 100), ve(2 * n, 7), pp(2 * n, 50), vp(2 * n, 5);
+    long long t0 = ahoraNs();
+    for (int r = 0; r < reps; r++) {
+        mover_entidades(pj.data(), vj.data(), 2);
+        mover_entidades(pe.data(), ve.data(), 2 * n);
+        mover_entidades(pp.data(), vp.data(), 2 * n);
+    }
+    return (ahoraNs() - t0) / 1000.0 / reps;
+}
+
+// Mide las tres comparaciones de un cuadro: jugador-enemigos, golpe-enemigos y proyectiles-jugador.
+static double medirColisiones(int n, int reps) {
+    std::vector<Rect> re(n), rp(n);
+    for (int i = 0; i < n; i++) {
+        re[i] = Rect{(i * 7) % 58, (i * 3) % 18, 1, 1};
+        rp[i] = Rect{(i * 5) % 58, (i * 11) % 18, 1, 1};
+    }
+    Rect rj{30, 10, 1, 1}, z{31, 9, 3, 2};
+    std::vector<uint8_t> res(MAX_ENT * MAX_ENT);
+    long long t0 = ahoraNs();
+    for (int r = 0; r < reps; r++) {
+        colisiones(&rj, 1, re.data(), n, res.data());
+        colisiones(&z, 1, re.data(), n, res.data());
+        colisiones(rp.data(), n, &rj, 1, res.data());
+    }
+    return (ahoraNs() - t0) / 1000.0 / reps;
+}
+
+// Mide copiar_sprite() para los 2n+1 sprites de un cuadro.
+static double medirSprites(int n, int reps) {
+    std::vector<char> buf(PANT_W * PANT_H, ' ');
+    char simbolo = 'S';
+    DatosSprite d;
+    d.buffer = buf.data();
+    d.bufAncho = PANT_W;
+    d.bufAlto = PANT_H;
+    d.sprite = &simbolo;
+    d.spAncho = 1;
+    d.spAlto = 1;
+    long long t0 = ahoraNs();
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i < 2 * n + 1; i++) {
+            d.x = 10 + (i * 7) % 60;
+            d.y = 2 + (i * 3) % 20;
+            copiar_sprite(&d);
+        }
+    }
+    return (ahoraNs() - t0) / 1000.0 / reps;
+}
+
+// Imprime el tiempo por cuadro, el de cada rutina y la fraccion f del cuadro que
+// ocupan las rutinas (dato para la Ley de Amdahl). Para medir tambien el refresh de
+// ncurses hay que correrlo en una terminal real, sin --sin-pantalla.
+void reporteBench(const BenchCuadro& b) {
+    if (b.cuadros == 0) return;
+#ifdef USAR_ASM
+    const char* version = "ensamblador AA32";
+#else
+    const char* version = "C++";
+#endif
+    printf("=== BENCH  N=%d  (%d cuadros, rutinas en %s) ===\n", b.n, b.cuadros, version);
+    if (!b.conPantalla)
+        printf("(sin pantalla: el refresco de ncurses NO se midio)\n");
+    printf("Tiempo promedio por cuadro:\n");
+    printf("  cuadro completo : %10.2f us\n", b.total_us);
+    printf("    logica        : %10.2f us\n", b.logica_us);
+    printf("    pintar buffer : %10.2f us\n", b.pintar_us);
+    printf("    refresh()     : %10.2f us\n", b.refresco_us);
+
+    const int reps = 20000;
+    double tm = medirMover(b.n, reps);
+    double tc = medirColisiones(b.n, reps);
+    double ts = medirSprites(b.n, reps);
+    printf("Rutinas (trabajo de un cuadro, medido aislado, %d repeticiones):\n", reps);
+    printf("  mover_entidades x3 : %10.3f us\n", tm);
+    printf("  colisiones x3      : %10.3f us\n", tc);
+    printf("  copiar_sprite x%-3d : %10.3f us\n", 2 * b.n + 1, ts);
+    double suma = tm + tc + ts;
+    printf("  suma rutinas       : %10.3f us\n", suma);
+    if (b.total_us > 0)
+        printf("Fraccion f del cuadro en las rutinas (para Amdahl): %.4f\n", suma / b.total_us);
+}
+
+// Game Engine 
+// Ctrl+C o SIGTERM piden salir de forma ordenada (se restaura la terminal).
+volatile std::sig_atomic_t senalSalir = 0;
+
+static void alSenal(int) { senalSalir = 1; }
+
+void instalarSenales() {
+    std::signal(SIGINT, alSenal);
+    std::signal(SIGTERM, alSenal);
+}
+
+// Aplica un comando a la maquina de estados (ver la descripcion de StateManager).
+void StateManager::procesar(const Comando& c, bool& iniciarPartida, bool& salir) {
+    if (c.accion == SALIR) {
+        salir = true;
+        return;
+    }
+    switch (estado) {
+        case E_MENU:
+            if (c.accion == ENTER) {
+                estado = E_JUGANDO;
+                iniciarPartida = true;
+            }
+            break;
+        case E_JUGANDO:
+            if (c.accion == PAUSA) estado = E_PAUSA;
+            break;
+        case E_PAUSA:
+            if (c.accion == PAUSA) estado = E_JUGANDO;
+            break;
+        case E_FIN:
+            if (c.accion == ENTER) estado = E_MENU;
+            break;
+    }
+}
+
+// Inicia ncurses, el renderer, la semilla aleatoria y carga el primer mapa.
+void GameEngine::inicializar() {
+    std::srand((unsigned)std::time(nullptr));
+    input.iniciar();
+    render.iniciar();
+    cargarMapa(0);
+}
+
+// Carga mapaN.txt (N = i+1); si falta el archivo usa la arena por defecto.
+void GameEngine::cargarMapa(int i) {
+    if (i < 0 || i >= NUM_MAPAS) i = 0;
+    mapa = i;
+    char ruta[32];
+    std::snprintf(ruta, sizeof(ruta), "mapa%d.txt", i + 1);
+    if (!arena.cargar(ruta)) arena.generarPorDefecto();
+}
+
+// Cambia a otro mapa al azar entre oleadas y reubica al jugador y los corazones si quedaron en una pared.
+void GameEngine::siguienteMapa() {
+    int r = std::rand() % (NUM_MAPAS - 1);
+    if (r >= mapa) r++;
+    cargarMapa(r);
+    int cx = aCelda(jugador.pos[0]), cy = aCelda(jugador.pos[1]);
+    arena.libreCerca(cx, cy);
+    jugador.pos[0] = jugador.prev[0] = aFijo(cx);
+    jugador.pos[1] = jugador.prev[1] = aFijo(cy);
+    jugador.vel[0] = jugador.vel[1] = 0;
+    for (uint32_t i = 0; i < corazones.n; i++) {
+        int hx = aCelda(corazones.pos[2 * i]), hy = aCelda(corazones.pos[2 * i + 1]);
+        if (arena.esPared(hx, hy) || arena.esPared(hx + 1, hy)) {
+            arena.libreCerca(hx, hy);
+            if (arena.esPared(hx + 1, hy)) hx--;
+            corazones.pos[2 * i] = corazones.prev[2 * i] = aFijo(hx);
+            corazones.pos[2 * i + 1] = corazones.prev[2 * i + 1] = aFijo(hy);
+        }
+    }
+}
+
+// Reinicia todo para una partida nueva: mapa, jugador, enemigos, proyectiles, corazones, oleada y puntos.
+void GameEngine::nuevaPartida(int mapaFijo) {
+    cargarMapa(mapaFijo >= 0 ? mapaFijo : std::rand() % NUM_MAPAS);
+    int cx = ARENA_W / 2, cy = ARENA_H / 2;
+    arena.libreCerca(cx, cy);
+    jugador.reiniciar(cx, cy);
+    enemigos.n = 0;
+    proyectiles.n = 0;
+    corazones.n = 0;
+    oleadas.reiniciar();
+    puntaje = 0;
+    esperando = true;
+    pausaOleada = 20;
+}

@@ -1633,3 +1633,140 @@ void GameEngine::pintar() {
         if (e == E_FIN) HUDManager::derrota(render, d);
     }
 }
+// Pinta el buffer y lo manda a la pantalla.
+void GameEngine::dibujar() {
+    pintar();
+    render.refrescar();
+}
+
+// Duerme lo que falte para que el cuadro dure 33 ms, asi el juego va a velocidad pareja.
+void GameEngine::controlarTiempo(const timespec& inicio) {
+    timespec ahora;
+    clock_gettime(CLOCK_MONOTONIC, &ahora);
+    long usado = (ahora.tv_sec - inicio.tv_sec) * 1000000000L + (ahora.tv_nsec - inicio.tv_nsec);
+    if (usado < NS_CUADRO) {
+        timespec dormir = { 0, NS_CUADRO - usado };
+        nanosleep(&dormir, nullptr);
+    }
+}
+
+void GameEngine::celdaLibreAleatoria(int& cx, int& cy) const {
+    do {
+        cx = 1 + std::rand() % (ARENA_W - 2);
+        cy = 1 + std::rand() % (ARENA_H - 2);
+    } while (arena.esPared(cx, cy));
+}
+
+// Modo de rendimiento: N enemigos (invencibles) y N proyectiles, 1000 cuadros sin
+// esperar entre ellos y con semilla fija; mide logica, pintar y refresh por separado.
+BenchCuadro GameEngine::benchmark(int n, bool conPantalla) {
+    BenchCuadro r;
+    r.n = n;
+    r.conPantalla = conPantalla;
+    if (n < 1) n = 1;
+    if (n > MAX_ENT) n = MAX_ENT;
+
+    std::srand(12345);
+    if (conPantalla) input.iniciar();
+    render.iniciar(conPantalla);
+    if (conPantalla && !render.terminalSuficiente()) {
+        input.cerrar();
+        std::fprintf(stderr, "Terminal muy pequena. Se necesita 80x24.\n");
+        return r;
+    }
+    nuevaPartida(0);
+    estados.forzarJugando();
+    esperando = false;
+    jugador.vida = 1000000000;
+    const int BIG = 1000000000;
+    for (int i = 0; i < n; i++) {
+        int t = (i % 3 != 2) ? SOLDADO : (((i / 3) % 2 == 0) ? ARQUERO : MAGO);
+        int cx, cy;
+        celdaLibreAleatoria(cx, cy);
+        Enemigos::agregar(enemigos, t, BIG, aFijo(cx), aFijo(cy));
+    }
+
+    const int CUADROS = 1000;
+    const std::vector<Comando> sinComandos;
+    long long tTotal = 0, tLogica = 0, tPintar = 0, tRefresco = 0;
+    for (int c = 0; c < CUADROS; c++) {
+        while (proyectiles.n < (uint32_t)n) {
+            int cx, cy;
+            celdaLibreAleatoria(cx, cy);
+            int d = std::rand() % 4;
+            int32_t vx = (d == 2) ? -VEL_PROY_X : (d == 3 ? VEL_PROY_X : 0);
+            int32_t vy = (d == 0) ? -VEL_PROY_Y : (d == 1 ? VEL_PROY_Y : 0);
+            Proyectiles::crear(proyectiles, aFijo(cx), aFijo(cy), vx, vy);
+        }
+        long long t0 = ahoraNs();
+        logica(sinComandos);
+        long long t1 = ahoraNs();
+        pintar();
+        long long t2 = ahoraNs();
+        render.refrescar();
+        long long t3 = ahoraNs();
+        tLogica += t1 - t0;
+        tPintar += t2 - t1;
+        tRefresco += t3 - t2;
+        tTotal += t3 - t0;
+    }
+    if (conPantalla) input.cerrar();
+
+    r.cuadros = CUADROS;
+    r.total_us = tTotal / 1000.0 / CUADROS;
+    r.logica_us = tLogica / 1000.0 / CUADROS;
+    r.pintar_us = tPintar / 1000.0 / CUADROS;
+    r.refresco_us = tRefresco / 1000.0 / CUADROS;
+    return r;
+}
+
+// Ayuda de linea de comandos.
+static void uso(const char* prog) {
+    std::printf("Uso:\n");
+    std::printf("  %s                                   jugar (el mapa cambia al azar en cada oleada)\n", prog);
+    std::printf("  %s --bench N [--sin-pantalla]\n", prog);
+    std::printf("      mide el rendimiento con N enemigos y N proyectiles (1 <= N <= %d)\n", MAX_ENT);
+}
+
+// Sin argumentos juega; con --bench N [--sin-pantalla] corre el modo de rendimiento.
+int main(int argc, char** argv) {
+    int bench = 0;
+    bool sinPantalla = false;
+    for (int i = 1; i < argc; i++) {
+        if (!std::strcmp(argv[i], "--bench") && i + 1 < argc) {
+            bench = std::atoi(argv[++i]);
+            if (bench < 1 || bench > MAX_ENT) {
+                uso(argv[0]);
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--sin-pantalla")) {
+            sinPantalla = true;
+        }
+        else if (!std::strcmp(argv[i], "--ayuda") || !std::strcmp(argv[i], "-h")) {
+            uso(argv[0]);
+            return 0;
+        }
+        else {
+            uso(argv[0]);
+            return 1;
+        }
+    }
+
+    instalarSenales();
+    GameEngine juego;
+
+    if (bench > 0) {
+        bool conPantalla = !sinPantalla && isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+        BenchCuadro b = juego.benchmark(bench, conPantalla);
+        if (b.cuadros == 0) return 1;
+        reporteBench(b);
+        return 0;
+    }
+
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        std::fprintf(stderr, "El juego necesita una terminal interactiva.\n");
+        return 1;
+    }
+    return juego.ejecutar();
+}

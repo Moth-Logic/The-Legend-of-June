@@ -403,7 +403,7 @@ private:
 
 // GameEngine: director del juego. Es el unico que conecta los modulos entre si:
 // en cada cuadro lee comandos, actualiza entidades, revisa colisiones, pide la
-// siguiente oleada y dibuja (ver cuadro() y logica()).
+// siguiente oleada 
 class GameEngine {
 public:
     GameEngine() {}
@@ -446,9 +446,7 @@ private:
     void celdaLibreAleatoria(int& cx, int& cy) const;
 };
 
-// RUTINAS CRITICAS - version en C++ (referencia)
-// Con -DUSAR_ASM estas funciones no se compilan y se usan las de ensamblador
-// (Etapa 3). Sirven para verificar que el ensamblador da los mismos resultados.
+
 #ifndef USAR_ASM
 
 extern "C" {
@@ -494,7 +492,9 @@ void copiar_sprite(DatosSprite* d) {
 // IMPLEMENTACION
 
 // Arena 
-Arena::Arena() { generarPorDefecto(); }
+Arena::Arena() { 
+    generarPorDefecto(); 
+}
 
 // Rellena de paredes el rectangulo de celdas (x0,y0)-(x1,y1) (ambos inclusive).
 void Arena::bloque(int x0, int y0, int x1, int y1) {
@@ -596,7 +596,9 @@ int KeyboardReader::leerTecla() {
     return t == ERR ? NINGUNA : t;
 }
 
-void KeyboardReader::cerrarNcurses() { endwin(); }
+void KeyboardReader::cerrarNcurses() { 
+    endwin(); 
+}
 
 // Agrega la tecla al final de la cola circular; si esta llena descarta la mas vieja.
 void InputBuffer::guardar(int tecla) {
@@ -772,14 +774,14 @@ bool Jugador::recibirDano() {
 
 Rect Jugador::rect() const { return Rect{ aCelda(pos[0]), aCelda(pos[1]), 1, 1 }; }
 
-// Zona de golpe: 3 celdas de ancho por 2 de profundidad delante del jugador segun hacia donde miro al atacar
+// Zona de golpe: 3 celdas de ancho por 3 de profundidad delante del jugador segun hacia donde miro al atacar
 Rect Jugador::zonaGolpe() const {
     int cx = aCelda(pos[0]), cy = aCelda(pos[1]);
     switch (dirGolpe) {
-    case ARRIBA: return Rect{ cx - 1, cy - 2, 3, 2 };
-    case ABAJO: return Rect{ cx - 1, cy + 1, 3, 2 };
-    case IZQUIERDA: return Rect{ cx - 2, cy - 1, 2, 3 };
-    default: return Rect{ cx + 1, cy - 1, 2, 3 };
+    case ARRIBA: return Rect{ cx - 1, cy - 3, 3, 3 };
+    case ABAJO: return Rect{ cx - 1, cy + 1, 3, 3 };
+    case IZQUIERDA: return Rect{ cx - 3, cy - 1, 3, 3 };
+    default: return Rect{ cx + 1, cy - 1, 3, 3 };
     }
 }
 
@@ -855,7 +857,7 @@ void Enemigos::actualizar(Entidades& e, const int32_t* jug, const FnDisparo& dis
                 if (horiz) vx = signo(dx) * VEL_PROY_X;
                 else vy = signo(dy) * VEL_PROY_Y;
                 disparar(p[0], p[1], vx, vy);
-                e.espera[i] = 60;
+                e.espera[i] = 90;
                 e.estado[i] = DISPARAR;
             }
         }
@@ -879,7 +881,7 @@ void Enemigos::actualizar(Entidades& e, const int32_t* jug, const FnDisparo& dis
                 int32_t vx = (int32_t)((int64_t)dx * VEL_PROY_X / m);
                 int32_t vy = (int32_t)((int64_t)dy * VEL_PROY_X / m);
                 disparar(p[0], p[1], vx, vy);
-                e.espera[i] = 80;
+                e.espera[i] = 120;
                 e.estado[i] = DISPARAR;
             }
         }
@@ -1209,4 +1211,562 @@ const uint8_t* CollisionDetector::comparar(const Rect* a, uint32_t na, const Rec
     if (nb > (uint32_t)MAX_ENT) nb = MAX_ENT;
     colisiones(a, na, b, nb, res);
     return res;
+}
+
+
+// Si la entidad quedo dentro de una pared, la regresa a su posicion anterior; primero
+// intenta conservar un eje para que pueda deslizarse a lo largo de la pared.
+void CollisionDetector::frenarContraPared(const Arena& arena, int32_t* p, const int32_t* q) {
+    int cx = aCelda(p[0]), cy = aCelda(p[1]);
+    if (!arena.esPared(cx, cy)) return;
+    int qx = aCelda(q[0]), qy = aCelda(q[1]);
+    if (!arena.esPared(cx, qy)) {
+        p[1] = q[1];
+    } else if (!arena.esPared(qx, cy)) {
+        p[0] = q[0];
+    } else {
+        p[0] = q[0];
+        p[1] = q[1];
+    }
+}
+
+// Desplaza una entidad (empuje) en 8 pasos, deteniendose antes de entrar en una pared.
+void CollisionDetector::desplazarSinPared(const Arena& arena, int32_t* pos, int32_t* prev, int32_t dx, int32_t dy) {
+    const int PASOS = 8;
+    for (int k = 0; k < PASOS; k++) {
+        int32_t nx = pos[0] + dx / PASOS, ny = pos[1] + dy / PASOS;
+        if (arena.esPared(aCelda(nx), aCelda(ny))) break;
+        pos[0] = nx;
+        pos[1] = ny;
+    }
+    prev[0] = pos[0];
+    prev[1] = pos[1];
+}
+
+// Modo de rendimiento (--bench) 
+// Tiempo actual en nanosegundos (CLOCK_MONOTONIC).
+static long long ahoraNs() {
+    timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000000000LL + t.tv_nsec;
+}
+
+// Mide (en microsegundos) el trabajo de mover_entidades() de un cuadro: jugador + n enemigos + n proyectiles.
+static double medirMover(int n, int reps) {
+    std::vector<int32_t> pj(2, 0), vj(2, 3), pe(2 * n, 100), ve(2 * n, 7), pp(2 * n, 50), vp(2 * n, 5);
+    long long t0 = ahoraNs();
+    for (int r = 0; r < reps; r++) {
+        mover_entidades(pj.data(), vj.data(), 2);
+        mover_entidades(pe.data(), ve.data(), 2 * n);
+        mover_entidades(pp.data(), vp.data(), 2 * n);
+    }
+    return (ahoraNs() - t0) / 1000.0 / reps;
+}
+
+// Mide las tres comparaciones de un cuadro: jugador-enemigos, golpe-enemigos y proyectiles-jugador.
+static double medirColisiones(int n, int reps) {
+    std::vector<Rect> re(n), rp(n);
+    for (int i = 0; i < n; i++) {
+        re[i] = Rect{(i * 7) % 58, (i * 3) % 18, 1, 1};
+        rp[i] = Rect{(i * 5) % 58, (i * 11) % 18, 1, 1};
+    }
+    Rect rj{30, 10, 1, 1}, z{31, 9, 3, 2};
+    std::vector<uint8_t> res(MAX_ENT * MAX_ENT);
+    long long t0 = ahoraNs();
+    for (int r = 0; r < reps; r++) {
+        colisiones(&rj, 1, re.data(), n, res.data());
+        colisiones(&z, 1, re.data(), n, res.data());
+        colisiones(rp.data(), n, &rj, 1, res.data());
+    }
+    return (ahoraNs() - t0) / 1000.0 / reps;
+}
+
+// Mide copiar_sprite() para los 2n+1 sprites de un cuadro.
+static double medirSprites(int n, int reps) {
+    std::vector<char> buf(PANT_W * PANT_H, ' ');
+    char simbolo = 'S';
+    DatosSprite d;
+    d.buffer = buf.data();
+    d.bufAncho = PANT_W;
+    d.bufAlto = PANT_H;
+    d.sprite = &simbolo;
+    d.spAncho = 1;
+    d.spAlto = 1;
+    long long t0 = ahoraNs();
+    for (int r = 0; r < reps; r++) {
+        for (int i = 0; i < 2 * n + 1; i++) {
+            d.x = 10 + (i * 7) % 60;
+            d.y = 2 + (i * 3) % 20;
+            copiar_sprite(&d);
+        }
+    }
+    return (ahoraNs() - t0) / 1000.0 / reps;
+}
+
+// Imprime el tiempo por cuadro, el de cada rutina y la fraccion f del cuadro que
+// ocupan las rutinas (dato para la Ley de Amdahl). Para medir tambien el refresh de
+// ncurses hay que correrlo en una terminal real, sin --sin-pantalla.
+void reporteBench(const BenchCuadro& b) {
+    if (b.cuadros == 0) return;
+#ifdef USAR_ASM
+    const char* version = "ensamblador AA32";
+#else
+    const char* version = "C++";
+#endif
+    printf("=== BENCH  N=%d  (%d cuadros, rutinas en %s) ===\n", b.n, b.cuadros, version);
+    if (!b.conPantalla)
+        printf("(sin pantalla: el refresco de ncurses NO se midio)\n");
+    printf("Tiempo promedio por cuadro:\n");
+    printf("  cuadro completo : %10.2f us\n", b.total_us);
+    printf("    logica        : %10.2f us\n", b.logica_us);
+    printf("    pintar buffer : %10.2f us\n", b.pintar_us);
+    printf("    refresh()     : %10.2f us\n", b.refresco_us);
+
+    const int reps = 20000;
+    double tm = medirMover(b.n, reps);
+    double tc = medirColisiones(b.n, reps);
+    double ts = medirSprites(b.n, reps);
+    printf("Rutinas (trabajo de un cuadro, medido aislado, %d repeticiones):\n", reps);
+    printf("  mover_entidades x3 : %10.3f us\n", tm);
+    printf("  colisiones x3      : %10.3f us\n", tc);
+    printf("  copiar_sprite x%-3d : %10.3f us\n", 2 * b.n + 1, ts);
+    double suma = tm + tc + ts;
+    printf("  suma rutinas       : %10.3f us\n", suma);
+    if (b.total_us > 0)
+        printf("Fraccion f del cuadro en las rutinas (para Amdahl): %.4f\n", suma / b.total_us);
+}
+
+// Game Engine 
+// Ctrl+C o SIGTERM piden salir de forma ordenada (se restaura la terminal).
+volatile std::sig_atomic_t senalSalir = 0;
+
+static void alSenal(int) { senalSalir = 1; }
+
+void instalarSenales() {
+    std::signal(SIGINT, alSenal);
+    std::signal(SIGTERM, alSenal);
+}
+
+// Aplica un comando a la maquina de estados (ver la descripcion de StateManager).
+void StateManager::procesar(const Comando& c, bool& iniciarPartida, bool& salir) {
+    if (c.accion == SALIR) {
+        salir = true;
+        return;
+    }
+    switch (estado) {
+        case E_MENU:
+            if (c.accion == ENTER) {
+                estado = E_JUGANDO;
+                iniciarPartida = true;
+            }
+            break;
+        case E_JUGANDO:
+            if (c.accion == PAUSA) estado = E_PAUSA;
+            break;
+        case E_PAUSA:
+            if (c.accion == PAUSA) estado = E_JUGANDO;
+            break;
+        case E_FIN:
+            if (c.accion == ENTER) estado = E_MENU;
+            break;
+    }
+}
+
+// Inicia ncurses, el renderer, la semilla aleatoria y carga el primer mapa.
+void GameEngine::inicializar() {
+    std::srand((unsigned)std::time(nullptr));
+    input.iniciar();
+    render.iniciar();
+    cargarMapa(0);
+}
+
+// Carga mapaN.txt (N = i+1); si falta el archivo usa la arena por defecto.
+void GameEngine::cargarMapa(int i) {
+    if (i < 0 || i >= NUM_MAPAS) i = 0;
+    mapa = i;
+    char ruta[32];
+    std::snprintf(ruta, sizeof(ruta), "mapa%d.txt", i + 1);
+    if (!arena.cargar(ruta)) arena.generarPorDefecto();
+}
+
+// Cambia a otro mapa al azar entre oleadas y reubica al jugador y los corazones si quedaron en una pared.
+void GameEngine::siguienteMapa() {
+    int r = std::rand() % (NUM_MAPAS - 1);
+    if (r >= mapa) r++;
+    cargarMapa(r);
+    int cx = aCelda(jugador.pos[0]), cy = aCelda(jugador.pos[1]);
+    arena.libreCerca(cx, cy);
+    jugador.pos[0] = jugador.prev[0] = aFijo(cx);
+    jugador.pos[1] = jugador.prev[1] = aFijo(cy);
+    jugador.vel[0] = jugador.vel[1] = 0;
+    for (uint32_t i = 0; i < corazones.n; i++) {
+        int hx = aCelda(corazones.pos[2 * i]), hy = aCelda(corazones.pos[2 * i + 1]);
+        if (arena.esPared(hx, hy) || arena.esPared(hx + 1, hy)) {
+            arena.libreCerca(hx, hy);
+            if (arena.esPared(hx + 1, hy)) hx--;
+            corazones.pos[2 * i] = corazones.prev[2 * i] = aFijo(hx);
+            corazones.pos[2 * i + 1] = corazones.prev[2 * i + 1] = aFijo(hy);
+        }
+    }
+}
+
+// Reinicia todo para una partida nueva: mapa, jugador, enemigos, proyectiles, corazones, oleada y puntos.
+void GameEngine::nuevaPartida(int mapaFijo) {
+    cargarMapa(mapaFijo >= 0 ? mapaFijo : std::rand() % NUM_MAPAS);
+    int cx = ARENA_W / 2, cy = ARENA_H / 2;
+    arena.libreCerca(cx, cy);
+    jugador.reiniciar(cx, cy);
+    enemigos.n = 0;
+    proyectiles.n = 0;
+    corazones.n = 0;
+    oleadas.reiniciar();
+    puntaje = 0;
+    esperando = true;
+    pausaOleada = 20;
+}
+// Ciclo principal: ejecuta un cuadro y espera lo que falte hasta completar 33 ms.
+int GameEngine::ejecutar() {
+    inicializar();
+    while (!salir && !senalSalir) {
+        timespec inicio;
+        clock_gettime(CLOCK_MONOTONIC, &inicio);
+        cuadro();
+        controlarTiempo(inicio);
+    }
+    input.cerrar();
+    return 0;
+}
+
+// Un cuadro: procesa comandos y estados corre la logica solo si se esta jugando, y dibuja.
+void GameEngine::cuadro() {
+    std::vector<Comando> cmds = input.leerComandos();
+    bool iniciar = false;
+    for (size_t i = 0; i < cmds.size(); i++)
+        estados.procesar(cmds[i], iniciar, salir);
+    if (salir) return;
+    if (iniciar) nuevaPartida();
+    if (estados.actual() == E_JUGANDO) logica(cmds);
+    dibujar();
+}
+
+// Logica de un cuadro, siempre en este orden: (1) comandos al jugador, (2) actualizar
+// y mover entidades (3) colisiones (4) eliminar muertos y recoger corazones,
+// (5) pedir la siguiente oleada. Si el jugador murio pasa a fin de partida.
+void GameEngine::logica(const std::vector<Comando>& cmds) {
+    jugador.leerComandos(cmds);
+    actualizarEntidades();
+    bool murio = revisarColisiones();
+    limpiarMuertos();
+    recogerCorazones();
+    pedirOleada();
+    if (murio) estados.derrota();
+}
+
+// Jugador movimientos y acciones de los enemigos (con la funcion para crear proyectiles) y movimiento de enemigos y proyectiles.
+void GameEngine::actualizarEntidades() {
+    jugador.actualizar();
+    Enemigos::actualizar(enemigos, jugador.pos, [this](int32_t x, int32_t y, int32_t vx, int32_t vy) {
+        Proyectiles::crear(proyectiles, x, y, vx, vy);
+        });
+    Enemigos::mover(enemigos);
+    Proyectiles::mover(proyectiles);
+}
+
+// Aleja y aturde a un enemigo que acaba de tocar al jugador.
+void GameEngine::empujarEnemigo(uint32_t j) {
+    int32_t dx = enemigos.pos[2 * j] - jugador.pos[0];
+    int32_t dy = enemigos.pos[2 * j + 1] - jugador.pos[1];
+    int64_t m = std::max<int64_t>(std::abs(dx), 2 * (int64_t)std::abs(dy));
+    if (m == 0) {
+        dx = (std::rand() & 1) ? 1 : -1;
+        dy = 0;
+        m = 1;
+    }
+    int32_t px = (int32_t)((int64_t)dx * aFijo(EMPUJE_CELDAS) / m);
+    int32_t py = (int32_t)((int64_t)dy * aFijo(EMPUJE_CELDAS) / m);
+    CollisionDetector::desplazarSinPared(arena, &enemigos.pos[2 * j], &enemigos.prev[2 * j], px, py);
+    Enemigos::aturdir(enemigos, j, ATURDIR_CUADROS);
+}
+
+// Paredes (frenan al jugador y a los enemigos, destruyen proyectiles) y tres
+// comparaciones de rectangulos: jugador-enemigos (dano al jugador si no es
+// invulnerable), zona de golpe-enemigos (dano y parpadeo) y proyectiles-jugador
+// (dano y el proyectil desaparece) Devuelve true si el jugador murio.
+bool GameEngine::revisarColisiones() {
+
+    CollisionDetector::frenarContraPared(arena, jugador.pos, jugador.prev);
+    for (uint32_t i = 0; i < enemigos.n; i++)
+        CollisionDetector::frenarContraPared(arena, &enemigos.pos[2 * i], &enemigos.prev[2 * i]);
+    for (uint32_t i = 0; i < proyectiles.n; i++) {
+        if (arena.esPared(aCelda(proyectiles.pos[2 * i]), aCelda(proyectiles.pos[2 * i + 1])))
+            proyectiles.vida[i] = 0;
+    }
+
+    bool murio = false;
+    Rect rj = jugador.rect();
+    Rect re[MAX_ENT];
+    Rect rp[MAX_ENT];
+    for (uint32_t i = 0; i < enemigos.n; i++) re[i] = enemigos.rect(i);
+    for (uint32_t i = 0; i < proyectiles.n; i++) rp[i] = proyectiles.rect(i);
+
+    if (enemigos.n > 0) {
+        const uint8_t* res = colisionador.comparar(&rj, 1, re, enemigos.n);
+        bool hayContacto = false;
+        for (uint32_t j = 0; j < enemigos.n; j++)
+            if (res[j] && enemigos.vida[j] > 0) hayContacto = true;
+        if (hayContacto && jugador.inmune == 0) {
+            if (jugador.recibirDano()) murio = true;
+            for (uint32_t j = 0; j < enemigos.n; j++)
+                if (res[j] && enemigos.vida[j] > 0) empujarEnemigo(j);
+            for (uint32_t i = 0; i < enemigos.n; i++) re[i] = enemigos.rect(i);
+        }
+    }
+
+    if (jugador.golpeActivo() && enemigos.n > 0) {
+        Rect z = jugador.zonaGolpe();
+        const uint8_t* res = colisionador.comparar(&z, 1, re, enemigos.n);
+        for (uint32_t j = 0; j < enemigos.n; j++)
+            if (res[j] && arena.lineaLibre(aCelda(jugador.pos[0]), aCelda(jugador.pos[1]),
+                aCelda(enemigos.pos[2 * j]), aCelda(enemigos.pos[2 * j + 1])))
+                Enemigos::recibirDano(enemigos, j);
+    }
+
+    if (proyectiles.n > 0) {
+        const uint8_t* res = colisionador.comparar(rp, proyectiles.n, &rj, 1);
+        for (uint32_t i = 0; i < proyectiles.n; i++) {
+            if (res[i] && proyectiles.vida[i] > 0) {
+                if (jugador.recibirDano()) murio = true;
+                proyectiles.vida[i] = 0;
+            }
+        }
+    }
+    return murio;
+}
+
+// Elimina enemigos y proyectiles sin vida al final del cuadro cada enemigo da 10 puntos y puede soltar un corazon.
+void GameEngine::limpiarMuertos() {
+    for (uint32_t i = 0; i < enemigos.n;) {
+        if (enemigos.vida[i] <= 0) {
+            puntaje += 10;
+            if (std::rand() % 100 < PROB_CORAZON)
+                soltarCorazon(enemigos.pos[2 * i], enemigos.pos[2 * i + 1]);
+            enemigos.eliminar(i);
+        }
+        else {
+            i++;
+        }
+    }
+    for (uint32_t i = 0; i < proyectiles.n;) {
+        if (proyectiles.vida[i] <= 0) proyectiles.eliminar(i);
+        else i++;
+    }
+}
+
+// Crea un corazon en la celda del enemigo (ocupa 2 columnas: "<3") su vida util es VIDA_CORAZON cuadros.
+void GameEngine::soltarCorazon(int32_t x, int32_t y) {
+    int cx = aCelda(x), cy = aCelda(y);
+    if (arena.esPared(cx, cy)) arena.libreCerca(cx, cy);
+    if (arena.esPared(cx + 1, cy)) cx--;          // el corazon ocupa 2 columnas ("<3")
+    if (corazones.agregar(0, 1, aFijo(cx), aFijo(cy), 0, 0))
+        corazones.espera[corazones.n - 1] = VIDA_CORAZON;
+}
+
+// Cuenta regresiva de cada corazon si el jugador lo toca y tiene la vida incompleta
+// le suma 1 de vida y el corazon desaparece Tambien desaparece al agotarse su tiempo.
+void GameEngine::recogerCorazones() {
+    for (uint32_t i = 0; i < corazones.n;) {
+        if (corazones.espera[i] > 0) corazones.espera[i]--;
+        bool tomado = false;
+        if (corazones.espera[i] > 0 && jugador.vida < VIDA_JUGADOR) {
+            Rect rc{ aCelda(corazones.pos[2 * i]), aCelda(corazones.pos[2 * i + 1]), 2, 1 };
+            Rect rj = jugador.rect();
+            uint8_t toca = 0;
+            colisiones(&rj, 1, &rc, 1, &toca);     // misma rutina de colisiones del juego
+            if (toca) {
+                jugador.vida++;
+                tomado = true;
+            }
+        }
+        if (tomado || corazones.espera[i] <= 0) corazones.eliminar(i);
+        else i++;
+    }
+}
+
+// Si no quedan enemigos: la primera vez cambia de mapa y espera 45 cuadros despues
+// lanza la siguiente oleada.
+void GameEngine::pedirOleada() {
+    if (!oleadas.terminada(enemigos.n)) return;
+    if (!esperando) {
+        esperando = true;
+        pausaOleada = 45;
+        proyectiles.n = 0;
+        siguienteMapa();
+    }
+    else if (--pausaOleada <= 0) {
+        oleadas.lanzar(arena, aCelda(jugador.pos[0]), aCelda(jugador.pos[1]),
+            [this](int tipo, int vida, int32_t x, int32_t y) {
+                return Enemigos::agregar(enemigos, tipo, vida, x, y);
+            });
+        esperando = false;
+    }
+}
+
+// Arma el cuadro completo en el buffer: menu, o arena + entidades + HUD (y pausa/derrota encima).
+void GameEngine::pintar() {
+    render.limpiar();
+    EstadoPartida e = estados.actual();
+    if (e == E_MENU) {
+        HUDManager::menu(render);
+    }
+    else {
+        DatosHUD d;
+        d.vida = jugador.vida < 0 ? 0 : jugador.vida;
+        d.oleada = oleadas.oleadaActual();
+        d.enemigos = (int)enemigos.n;
+        d.puntaje = puntaje;
+        d.mapa = nombreMapa(mapa);
+        d.esperando = esperando && enemigos.n == 0;
+        render.pintarArena(arena);
+        render.pintarEntidades(arena, jugador, enemigos, proyectiles, corazones);
+        HUDManager::dibujar(render, d);
+        if (e == E_PAUSA) HUDManager::pausa(render);
+        if (e == E_FIN) HUDManager::derrota(render, d);
+    }
+}
+// Pinta el buffer y lo manda a la pantalla.
+void GameEngine::dibujar() {
+    pintar();
+    render.refrescar();
+}
+
+// Duerme lo que falte para que el cuadro dure 33 ms, asi el juego va a velocidad pareja.
+void GameEngine::controlarTiempo(const timespec& inicio) {
+    timespec ahora;
+    clock_gettime(CLOCK_MONOTONIC, &ahora);
+    long usado = (ahora.tv_sec - inicio.tv_sec) * 1000000000L + (ahora.tv_nsec - inicio.tv_nsec);
+    if (usado < NS_CUADRO) {
+        timespec dormir = { 0, NS_CUADRO - usado };
+        nanosleep(&dormir, nullptr);
+    }
+}
+
+void GameEngine::celdaLibreAleatoria(int& cx, int& cy) const {
+    do {
+        cx = 1 + std::rand() % (ARENA_W - 2);
+        cy = 1 + std::rand() % (ARENA_H - 2);
+    } while (arena.esPared(cx, cy));
+}
+
+// Modo de rendimiento: N enemigos (invencibles) y N proyectiles, 1000 cuadros sin
+// esperar entre ellos y con semilla fija; mide logica, pintar y refresh por separado.
+BenchCuadro GameEngine::benchmark(int n, bool conPantalla) {
+    BenchCuadro r;
+    r.n = n;
+    r.conPantalla = conPantalla;
+    if (n < 1) n = 1;
+    if (n > MAX_ENT) n = MAX_ENT;
+
+    std::srand(12345);
+    if (conPantalla) input.iniciar();
+    render.iniciar(conPantalla);
+    if (conPantalla && !render.terminalSuficiente()) {
+        input.cerrar();
+        std::fprintf(stderr, "Terminal muy pequena. Se necesita 80x24.\n");
+        return r;
+    }
+    nuevaPartida(0);
+    estados.forzarJugando();
+    esperando = false;
+    jugador.vida = 1000000000;
+    const int BIG = 1000000000;
+    for (int i = 0; i < n; i++) {
+        int t = (i % 3 != 2) ? SOLDADO : (((i / 3) % 2 == 0) ? ARQUERO : MAGO);
+        int cx, cy;
+        celdaLibreAleatoria(cx, cy);
+        Enemigos::agregar(enemigos, t, BIG, aFijo(cx), aFijo(cy));
+    }
+
+    const int CUADROS = 1000;
+    const std::vector<Comando> sinComandos;
+    long long tTotal = 0, tLogica = 0, tPintar = 0, tRefresco = 0;
+    for (int c = 0; c < CUADROS; c++) {
+        while (proyectiles.n < (uint32_t)n) {
+            int cx, cy;
+            celdaLibreAleatoria(cx, cy);
+            int d = std::rand() % 4;
+            int32_t vx = (d == 2) ? -VEL_PROY_X : (d == 3 ? VEL_PROY_X : 0);
+            int32_t vy = (d == 0) ? -VEL_PROY_Y : (d == 1 ? VEL_PROY_Y : 0);
+            Proyectiles::crear(proyectiles, aFijo(cx), aFijo(cy), vx, vy);
+        }
+        long long t0 = ahoraNs();
+        logica(sinComandos);
+        long long t1 = ahoraNs();
+        pintar();
+        long long t2 = ahoraNs();
+        render.refrescar();
+        long long t3 = ahoraNs();
+        tLogica += t1 - t0;
+        tPintar += t2 - t1;
+        tRefresco += t3 - t2;
+        tTotal += t3 - t0;
+    }
+    if (conPantalla) input.cerrar();
+
+    r.cuadros = CUADROS;
+    r.total_us = tTotal / 1000.0 / CUADROS;
+    r.logica_us = tLogica / 1000.0 / CUADROS;
+    r.pintar_us = tPintar / 1000.0 / CUADROS;
+    r.refresco_us = tRefresco / 1000.0 / CUADROS;
+    return r;
+}
+
+// Ayuda de linea de comandos.
+static void uso(const char* prog) {
+    std::printf("Uso:\n");
+    std::printf("  %s                                   jugar (el mapa cambia al azar en cada oleada)\n", prog);
+    std::printf("  %s --bench N [--sin-pantalla]\n", prog);
+    std::printf("      mide el rendimiento con N enemigos y N proyectiles (1 <= N <= %d)\n", MAX_ENT);
+}
+
+// Sin argumentos juega; con --bench N [--sin-pantalla] corre el modo de rendimiento.
+int main(int argc, char** argv) {
+    int bench = 0;
+    bool sinPantalla = false;
+    for (int i = 1; i < argc; i++) {
+        if (!std::strcmp(argv[i], "--bench") && i + 1 < argc) {
+            bench = std::atoi(argv[++i]);
+            if (bench < 1 || bench > MAX_ENT) {
+                uso(argv[0]);
+                return 1;
+            }
+        }
+        else if (!std::strcmp(argv[i], "--sin-pantalla")) {
+            sinPantalla = true;
+        }
+        else if (!std::strcmp(argv[i], "--ayuda") || !std::strcmp(argv[i], "-h")) {
+            uso(argv[0]);
+            return 0;
+        }
+        else {
+            uso(argv[0]);
+            return 1;
+        }
+    }
+
+    instalarSenales();
+    GameEngine juego;
+
+    if (bench > 0) {
+        bool conPantalla = !sinPantalla && isatty(STDIN_FILENO) && isatty(STDOUT_FILENO);
+        BenchCuadro b = juego.benchmark(bench, conPantalla);
+        if (b.cuadros == 0) return 1;
+        reporteBench(b);
+        return 0;
+    }
+
+    if (!isatty(STDIN_FILENO) || !isatty(STDOUT_FILENO)) {
+        std::fprintf(stderr, "El juego necesita una terminal interactiva.\n");
+        return 1;
+    }
+    return juego.ejecutar();
 }

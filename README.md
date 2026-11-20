@@ -4,13 +4,14 @@ Juego ASCII de supervivencia para la terminal, inspirado en The Legend of Zelda.
 Esquivá proyectiles, atacá con la espada y sobreviví oleadas de enemigos cada vez más difíciles.
 
 Proyecto del curso **Arquitectura de Computadores** (TEC), en tres etapas: diseño, implementación
-en C++ y rutinas críticas en ensamblador ARM A32. Por ahora el repositorio tiene los tipos, los
-mapas y las declaraciones de los módulos: **el juego todavía no se puede ejecutar**.
+en C++ y rutinas críticas en ensamblador ARM A32. Por ahora el repositorio tiene la **Etapa 2
+completa**: el juego ya se puede ejecutar (probado en Raspberry Pi 4 B).
 
 ## Controles
 
 | Acción | Teclas |
 | :--- | :--- |
+| Iniciar | `Enter` |
 | Mover | Flechas o `W` `A` `S` `D` |
 | Atacar | `Espacio` |
 | Pausa | `P` |
@@ -27,9 +28,11 @@ Necesitás g++ con C++17, ncurses y una terminal de al menos 80×24.
 
 ```bash
 sudo apt install build-essential libncurses-dev
-g++ -std=c++17 -O2 main.cpp -o june -lncurses
+make
 ./june
 ```
+
+Para medir el rendimiento: `make bench` (o `./june --bench N`).
 
 ## Equipo
 

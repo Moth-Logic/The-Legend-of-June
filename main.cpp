@@ -774,14 +774,14 @@ bool Jugador::recibirDano() {
 
 Rect Jugador::rect() const { return Rect{ aCelda(pos[0]), aCelda(pos[1]), 1, 1 }; }
 
-// Zona de golpe: 3 celdas de ancho por 2 de profundidad delante del jugador segun hacia donde miro al atacar
+// Zona de golpe: 3 celdas de ancho por 3 de profundidad delante del jugador segun hacia donde miro al atacar
 Rect Jugador::zonaGolpe() const {
     int cx = aCelda(pos[0]), cy = aCelda(pos[1]);
     switch (dirGolpe) {
-    case ARRIBA: return Rect{ cx - 1, cy - 2, 3, 2 };
-    case ABAJO: return Rect{ cx - 1, cy + 1, 3, 2 };
-    case IZQUIERDA: return Rect{ cx - 2, cy - 1, 2, 3 };
-    default: return Rect{ cx + 1, cy - 1, 2, 3 };
+    case ARRIBA: return Rect{ cx - 1, cy - 3, 3, 3 };
+    case ABAJO: return Rect{ cx - 1, cy + 1, 3, 3 };
+    case IZQUIERDA: return Rect{ cx - 3, cy - 1, 3, 3 };
+    default: return Rect{ cx + 1, cy - 1, 3, 3 };
     }
 }
 
@@ -857,7 +857,7 @@ void Enemigos::actualizar(Entidades& e, const int32_t* jug, const FnDisparo& dis
                 if (horiz) vx = signo(dx) * VEL_PROY_X;
                 else vy = signo(dy) * VEL_PROY_Y;
                 disparar(p[0], p[1], vx, vy);
-                e.espera[i] = 60;
+                e.espera[i] = 90;
                 e.estado[i] = DISPARAR;
             }
         }
@@ -881,7 +881,7 @@ void Enemigos::actualizar(Entidades& e, const int32_t* jug, const FnDisparo& dis
                 int32_t vx = (int32_t)((int64_t)dx * VEL_PROY_X / m);
                 int32_t vy = (int32_t)((int64_t)dy * VEL_PROY_X / m);
                 disparar(p[0], p[1], vx, vy);
-                e.espera[i] = 80;
+                e.espera[i] = 120;
                 e.estado[i] = DISPARAR;
             }
         }

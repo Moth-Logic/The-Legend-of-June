@@ -2,6 +2,7 @@
 
 Juego ASCII de supervivencia para la terminal, inspirado en The Legend of Zelda.
 Esquivá proyectiles, atacá con la espada y sobreviví oleadas de enemigos cada vez más difíciles.
+Tenés 10 puntos de vida, que se muestran como `[##########]` y bajan de a uno por golpe.
 
 Proyecto del curso **Arquitectura de Computadores** (TEC), en tres etapas: diseño, implementación
 en C++ y rutinas críticas en ensamblador ARM A32. Por ahora el repositorio tiene la **Etapa 2
@@ -19,8 +20,9 @@ completa**: el juego ya se puede ejecutar (probado en Raspberry Pi 4 B).
 
 ## Mapas
 
-Cinco mapas de 60×20 celdas en `mapa1.txt` … `mapa5.txt`: Clasico, Cruz, Cuatro cuartos,
-Barras y Columnas. Para crear uno propio, copiá cualquiera y respetá el tamaño.
+Quince mapas de 60×20 celdas en `mapa1.txt` … `mapa15.txt`: Clasico, Cruz, Cuatro cuartos,
+Barras, Columnas, Serpiente, Pasillos, Anillos, Zigzag, Gemelos, Aspa, Fortaleza, Puertas,
+Espiral y Campos. Para crear uno propio, copiá cualquiera y respetá el tamaño.
 
 ## Compilar
 

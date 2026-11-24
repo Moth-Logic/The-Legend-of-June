@@ -38,7 +38,7 @@ const int ARENA_X = 10;
 const int ARENA_Y = 2;
 const int FP_BITS = 8;
 const int MAX_ENT = 64;
-const int NUM_MAPAS = 15;
+const int NUM_MAPAS = 5;
 const long NS_CUADRO = 33333333L;
 
 // Valores de combate (en cuadros salvo que se diga otra cosa):
@@ -49,7 +49,7 @@ const long NS_CUADRO = 33333333L;
 //    (la terminal no avisa cuando se suelta, solo repite la tecla).
 //  - ATURDIR_CUADROS / EMPUJE_CELDAS: aturdimiento y empuje del enemigo que toca al jugador.
 //  - DESVIO_CUADROS: cuadros que un enemigo trabado rodea un obstaculo.
-const int VIDA_JUGADOR = 10;
+const int VIDA_JUGADOR = 5;
 const int INMUNE_JUGADOR = 30;
 const int GOLPE_DURACION = 4;
 const int GOLPE_ESPERA = 10;
@@ -62,7 +62,7 @@ const int TECLA_ESC = 27;
 const int DESVIO_CUADROS = 45;
 // Corazones: probabilidad (%) de que un enemigo muerto suelte uno, cuadros que
 // dura en el suelo y cuadros finales en los que parpadea.
-const int PROB_CORAZON = 25;      // % de probabilidad de que un enemigo suelte un corazon
+const int PROB_CORAZON = 20;      // % de probabilidad de que un enemigo suelte un corazon
 const int VIDA_CORAZON = 450;     // cuadros que dura un corazon en el suelo (15 s)
 const int CORAZON_PARPADEA = 90;  // en los ultimos cuadros el corazon parpadea
 
@@ -88,13 +88,9 @@ enum EstadoEnemigo { PERSEGUIR, DISPARAR, HERIDO };
 struct Comando { Accion accion; Dir dir; };
 struct Rect { int32_t x, y, ancho, alto; };
 
-// Nombre de cada uno de los 15 mapas (mapa1.txt ... mapa15.txt) para mostrarlo en el HUD.
+// Nombre de cada uno de los 5 mapas (mapa1.txt ... mapa5.txt) para mostrarlo en el HUD.
 inline const char* nombreMapa(int i) {
-    static const char* nombres[NUM_MAPAS] = {
-        "Clasico", "Cruz", "Cuatro cuartos", "Barras", "Columnas",
-        "Serpiente", "Pasillos", "Anillos", "Zigzag", "Gemelos",
-        "Aspa", "Fortaleza", "Puertas", "Espiral", "Campos"
-    };
+    static const char* nombres[NUM_MAPAS] = { "Clasico", "Cruz", "Cuatro cuartos", "Barras", "Columnas" };
     return nombres[i];
 }
 
@@ -1165,10 +1161,8 @@ void Renderer::refrescar() {
 
 // Capa 3 (HUD): vida con corazones, oleada, enemigos que quedan, puntos, mapa y controles.
 void HUDManager::dibujar(Renderer& r, const DatosHUD& d) {
-    // Barra de vida de ancho fijo: cada golpe apaga un '#' y el ']' no se mueve.
-    std::string v = "VIDA [";
-    for (int i = 0; i < VIDA_JUGADOR; i++) v += (i < d.vida ? '#' : ' ');
-    v += ']';
+    std::string v = "VIDA ";
+    for (int i = 0; i < VIDA_JUGADOR; i++) v += (i < d.vida) ? "<3 " : "-- ";
     r.texto(1, 0, v, C_ROJO);
     std::string o = "OLEADA " + std::to_string(d.oleada) + "   ENEMIGOS " + std::to_string(d.enemigos) +
         "   PUNTOS " + std::to_string(d.puntaje);

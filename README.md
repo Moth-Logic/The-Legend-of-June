@@ -28,6 +28,14 @@ Oleada *n* = `2n − 1` enemigos (tope 60). Cada baja vale 10 puntos. Sobrevivir
 **Enter** inicia partida, **flechas** o **WASD** mueven, **Espacio** (o **J**) ataca,
 **P** pausa y **Q** / **Esc** sale.
 
+## Música
+
+El menú y la partida tienen su propia pista en `MUSIC/` (`JUNE_MENU.wav` y
+`JUNE_BATTLE.wav`), en bucle mientras dure cada estado. Se reproduce con el primer
+reproductor que aparezca en el `PATH` (`aplay`, `paplay`, `ffplay`, `mpv` o `play`);
+si no hay ninguno, el juego funciona igual, en silencio. En Raspberry Pi OS alcanza
+con `sudo apt install alsa-utils`.
+
 ## Compilar
 
 Necesitás g++ con C++17, ncurses y una terminal de 80×24 o más.

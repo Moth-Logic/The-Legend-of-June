@@ -19,7 +19,14 @@
 #include <ncurses.h>
 #include <algorithm>
 #include <cstdio>
+#include <cerrno>
 #include <unistd.h>
+#ifdef __unix__
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#endif
 
 
 // CONSTANTES DEL JUEGO
@@ -401,6 +408,21 @@ private:
     EstadoPartida estado = E_MENU;
 };
 
+// Musica: reproduce en bucle la pista del menu o de la partida con un reproductor
+// externo (aplay, paplay, ffplay, mpv o play) en un proceso hijo, que se mata al
+// cambiar de pista o al salir. Si no hay reproductor o falta el WAV, no suena nada.
+class Musica {
+public:
+    ~Musica() { detener(); }
+    void actualizar(EstadoPartida e);
+    void detener();
+private:
+    enum Pista { SIN_PISTA, PISTA_MENU, PISTA_BATALLA };
+    void iniciar(const char* archivo);
+    Pista actual = SIN_PISTA;
+    int pid = -1;
+};
+
 // GameEngine: director del juego. Es el unico que conecta los modulos entre si:
 // en cada cuadro lee comandos, actualiza entidades, revisa colisiones, pide la
 // siguiente oleada 
@@ -417,7 +439,8 @@ private:
     StateManager estados;
     Renderer render;
     WaveManager oleadas;
-    CollisionDetector colisionador;
+        CollisionDetector colisionador;
+    Musica musica;
     Jugador jugador;
     Entidades enemigos;
     Entidades proyectiles;
@@ -1433,6 +1456,7 @@ int GameEngine::ejecutar() {
         cuadro();
         controlarTiempo(inicio);
     }
+    musica.detener();
     input.cerrar();
     return 0;
 }
@@ -1445,6 +1469,7 @@ void GameEngine::cuadro() {
         estados.procesar(cmds[i], iniciar, salir);
     if (salir) return;
     if (iniciar) nuevaPartida();
+    musica.actualizar(estados.actual());
     if (estados.actual() == E_JUGANDO) logica(cmds);
     dibujar();
 }
@@ -1718,6 +1743,97 @@ BenchCuadro GameEngine::benchmark(int n, bool conPantalla) {
     r.pintar_us = tPintar / 1000.0 / CUADROS;
     r.refresco_us = tRefresco / 1000.0 / CUADROS;
     return r;
+}
+
+// MUSICA
+#ifdef __unix__
+// Busca un ejecutable en el PATH (igual que la shell).
+static bool programaDisponible(const char* nombre) {
+    const char* ruta = std::getenv("PATH");
+    if (!ruta) return false;
+    const char* p = ruta;
+    while (true) {
+        const char* fin = std::strchr(p, ':');
+        size_t n = fin ? (size_t)(fin - p) : std::strlen(p);
+        char cand[512];
+        if (n + std::strlen(nombre) + 2 < sizeof(cand)) {
+            std::memcpy(cand, p, n);
+            cand[n] = '/';
+            std::strcpy(cand + n + 1, nombre);
+            if (access(cand, X_OK) == 0) return true;
+        }
+        if (!fin) return false;
+        p = fin + 1;
+    }
+}
+
+// Formato de comando del primer reproductor disponible (se busca una sola vez).
+static const char* reproductorDisponible() {
+    if (programaDisponible("aplay"))  return "aplay -q '%s'";
+    if (programaDisponible("paplay")) return "paplay '%s'";
+    if (programaDisponible("ffplay")) return "ffplay -nodisp -autoexit -loglevel quiet '%s'";
+    if (programaDisponible("mpv"))    return "mpv --no-video --really-quiet --no-terminal '%s'";
+    if (programaDisponible("play"))   return "play -q '%s'";
+    return nullptr;
+}
+#endif
+
+// Lanza en segundo plano un bucle que repite el WAV hasta que se mate el proceso.
+void Musica::iniciar(const char* archivo) {
+#ifdef __unix__
+    static const char* formato = nullptr;
+    static bool buscado = false;
+    if (!buscado) {
+        buscado = true;
+        formato = reproductorDisponible();
+    }
+    if (!formato || access(archivo, R_OK) != 0) return;
+
+    char pista[600];
+    char comando[700];
+    std::snprintf(pista, sizeof(pista), formato, archivo);
+    std::snprintf(comando, sizeof(comando), "while :; do %s || sleep 1; done", pista);
+
+    pid_t p = fork();
+    if (p < 0) return;
+    if (p == 0) {
+        setpgid(0, 0);
+        int fd = open("/dev/null", O_RDWR);
+        if (fd >= 0) {
+            dup2(fd, STDIN_FILENO);
+            dup2(fd, STDOUT_FILENO);
+            dup2(fd, STDERR_FILENO);
+            if (fd > 2) close(fd);
+        }
+        execl("/bin/sh", "sh", "-c", comando, (char*)nullptr);
+        _exit(127);
+    }
+    setpgid(p, p);
+    pid = (int)p;
+#else
+    (void)archivo;
+#endif
+}
+
+// Corta la pista en curso (shell y reproductor, en su propio grupo de procesos).
+void Musica::detener() {
+#ifdef __unix__
+    if (pid <= 0) return;
+    kill(-pid, SIGTERM);
+    kill(pid, SIGTERM);
+    while (waitpid(pid, nullptr, 0) < 0 && errno == EINTR) {}
+    pid = -1;
+#endif
+}
+
+// Menu -> pista del menu; jugando, pausa y fin -> pista de batalla.
+void Musica::actualizar(EstadoPartida e) {
+    Pista deseada = (e == E_MENU) ? PISTA_MENU : PISTA_BATALLA;
+    if (deseada == actual) return;
+    detener();
+    actual = deseada;
+    if (deseada == PISTA_MENU) iniciar("MUSIC/JUNE_MENU.wav");
+    else iniciar("MUSIC/JUNE_BATTLE.wav");
 }
 
 // Ayuda de linea de comandos.

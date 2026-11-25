@@ -34,7 +34,8 @@ El menú y la partida tienen su propia pista en `MUSIC/` (`JUNE_MENU.wav` y
 `JUNE_BATTLE.wav`), en bucle mientras dure cada estado. Se reproduce con el primer
 reproductor que aparezca en el `PATH` (`aplay`, `paplay`, `ffplay`, `mpv` o `play`);
 si no hay ninguno, el juego funciona igual, en silencio. En Raspberry Pi OS alcanza
-con `sudo apt install alsa-utils`.
+con `sudo apt install alsa-utils`. La pista se corta al salir del juego (Q/Esc,
+Ctrl+C) y también al cerrar la terminal, sin dejar procesos de audio sueltos.
 
 ## Compilar
 

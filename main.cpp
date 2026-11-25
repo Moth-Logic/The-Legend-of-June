@@ -27,6 +27,9 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #endif
+#ifdef __linux__
+#include <sys/prctl.h>
+#endif
 
 
 // CONSTANTES DEL JUEGO
@@ -1360,7 +1363,8 @@ void reporteBench(const BenchCuadro& b) {
 }
 
 // Game Engine 
-// Ctrl+C o SIGTERM piden salir de forma ordenada (se restaura la terminal).
+// Ctrl+C, SIGTERM o el cierre de la terminal (SIGHUP) piden salir de forma
+// ordenada: se corta la musica y se restaura la terminal.
 volatile std::sig_atomic_t senalSalir = 0;
 
 static void alSenal(int) { senalSalir = 1; }
@@ -1368,6 +1372,9 @@ static void alSenal(int) { senalSalir = 1; }
 void instalarSenales() {
     std::signal(SIGINT, alSenal);
     std::signal(SIGTERM, alSenal);
+#ifdef SIGHUP
+    std::signal(SIGHUP, alSenal);
+#endif
 }
 
 // Aplica un comando a la maquina de estados (ver la descripcion de StateManager).
@@ -1790,13 +1797,28 @@ void Musica::iniciar(const char* archivo) {
     if (!formato || access(archivo, R_OK) != 0) return;
 
     char pista[600];
-    char comando[700];
+    char comando[800];
     std::snprintf(pista, sizeof(pista), formato, archivo);
-    std::snprintf(comando, sizeof(comando), "while :; do %s || sleep 1; done", pista);
+    // El reproductor corre en segundo plano dentro del shell y el shell espera su
+    // fin: asi el trap se ejecuta enseguida si el juego o la terminal mandan
+    // HUP/TERM, y corta el reproductor antes de salir. Sin el trap, al cerrar la
+    // terminal la pista seguiria sonando como proceso huerfano.
+    std::snprintf(comando, sizeof(comando),
+                  "trap '[ -n \"$n\" ] && kill -TERM $n; exit 0' HUP TERM INT; "
+                  "while :; do %s & n=$!; wait $n || sleep 1; done", pista);
 
+#ifdef __linux__
+    pid_t padre = getpid();
+#endif
     pid_t p = fork();
     if (p < 0) return;
     if (p == 0) {
+#ifdef __linux__
+        // Si el juego desaparece (incluso con kill -9 o un cierre de sesion), el
+        // kernel manda SIGTERM a este shell y su trap corta la musica.
+        prctl(PR_SET_PDEATHSIG, SIGTERM);
+        if (getppid() != padre) _exit(0);
+#endif
         setpgid(0, 0);
         int fd = open("/dev/null", O_RDWR);
         if (fd >= 0) {
